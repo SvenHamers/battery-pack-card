@@ -1,5 +1,7 @@
 # Battery Pack Card
 
+[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=SvenHamers&repository=battery-pack-card&category=plugin)
+
 ![Two batteries side by side](screenshot.png)
 
 A visual Lovelace card for Home Assistant that renders a 4s–32s lithium battery pack — SOC silhouette, six headline stats, status pills for charge / discharge / balance / heater, a colour-coded per-cell array (voltage + internal resistance, tinted by deviation from pack average), min/max/avg/Δ summary line, and a temperature strip. Read-only: it never writes to the BMS.
@@ -16,9 +18,11 @@ Using a different BMS? Use the **Advanced** tab to point each field at your own 
 
 ### Via HACS (recommended)
 
-1. HACS → Frontend → ⋮ → Custom repositories → add `https://github.com/SvenHamers/battery-pack-card` with category **Lovelace**.
-2. Install **Battery Pack Card**.
-3. Hard-refresh the dashboard (Ctrl/Cmd+Shift+R).
+[![Open in HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=SvenHamers&repository=battery-pack-card&category=plugin)
+
+Click the badge above — it opens your own Home Assistant with the HACS custom-repository dialog pre-filled. Press **ADD**, then download **Battery Pack Card** from the HACS Frontend list and hard-refresh the dashboard.
+
+Or do it manually: HACS → Frontend → ⋮ → Custom repositories → add `https://github.com/SvenHamers/battery-pack-card` with category **Lovelace** → install **Battery Pack Card** → hard-refresh (Ctrl/Cmd+Shift+R).
 
 ### Manual
 
