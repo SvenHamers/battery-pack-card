@@ -15,7 +15,7 @@
  * Click any element to open the matching entity's more-info dialog.
  */
 
-const VERSION = "1.2.1";
+const VERSION = "1.3.0";
 
 const DEFAULTS = {
   name: "",
@@ -271,13 +271,17 @@ class BatteryPackCard extends HTMLElement {
 
   _cellEntity(kind, n) {
     const c = this._config;
+    const suffix = kind === "v" ? "volt" : "ohm";
+    // 1. explicit per-cell override wins
+    const explicit = orNull(c[`entity_cell_${n}_${suffix}`]);
+    if (explicit) return explicit;
+    // 2. pattern with {n} placeholder
     const patternKey = kind === "v" ? "cell_voltage_pattern" : "cell_resistance_pattern";
     const pat = orNull(c[patternKey]);
     if (pat) return pat.replace("{n}", n);
+    // 3. prefix-derived default
     if (!c.prefix) return null;
-    return kind === "v"
-      ? `sensor.${c.prefix}_cell_${n}_volt`
-      : `sensor.${c.prefix}_cell_${n}_ohm`;
+    return `sensor.${c.prefix}_cell_${n}_${suffix}`;
   }
 
   _render() {
@@ -640,20 +644,67 @@ class BatteryPackCardEditor extends HTMLElement {
 
     this._advForms = [];
     for (const section of ADVANCED_SECTIONS) {
-      const h = document.createElement("div");
-      h.className = "bpc-section-title";
-      h.textContent = section.title;
-      this._advPane.appendChild(h);
-
-      const f = document.createElement("ha-form");
-      f.schema = section.schema;
-      f.computeLabel = (s) => LABELS[s.name] || s.name || "";
-      f.addEventListener("value-changed", (ev) => {
-        this._dispatch({ ...this._config, ...ev.detail.value });
-      });
-      this._advPane.appendChild(f);
-      this._advForms.push(f);
+      this._appendAdvSection(section.title, section.schema);
     }
+    // Placeholder; the per-cell sections are rebuilt whenever `cells` changes.
+    this._cellSlot = document.createElement("div");
+    this._advPane.appendChild(this._cellSlot);
+    this._cellForms = [];
+    this._lastCellsN = -1;
+  }
+
+  _appendAdvSection(title, schema, parent) {
+    parent = parent || this._advPane;
+    const h = document.createElement("div");
+    h.className = "bpc-section-title";
+    h.textContent = title;
+    parent.appendChild(h);
+
+    const f = document.createElement("ha-form");
+    f.schema = schema;
+    f.computeLabel = (s) => {
+      if (LABELS[s.name]) return LABELS[s.name];
+      const m = /^entity_cell_(\d+)_(volt|ohm)$/.exec(s.name);
+      if (m) return `Cell #${m[1]} ${m[2] === "volt" ? "voltage" : "resistance"}`;
+      return s.name || "";
+    };
+    f.addEventListener("value-changed", (ev) => {
+      this._dispatch({ ...this._config, ...ev.detail.value });
+    });
+    parent.appendChild(f);
+    this._advForms.push(f);
+    return f;
+  }
+
+  _rebuildCellSections(N) {
+    // Tear down whatever's there
+    this._cellSlot.innerHTML = "";
+    this._cellForms.forEach((f) => {
+      const idx = this._advForms.indexOf(f);
+      if (idx >= 0) this._advForms.splice(idx, 1);
+    });
+    this._cellForms = [];
+
+    const buildSchema = (suffix) => {
+      const fields = [];
+      for (let n = 1; n <= N; n++) {
+        fields.push({ name: `entity_cell_${n}_${suffix}`, selector: ENT_SENSOR });
+      }
+      // Two columns to keep the form compact.
+      return [{ type: "grid", name: "", schema: fields }];
+    };
+
+    const vForm = this._appendAdvSection(
+      `Per-cell voltages (1..${N})`,
+      buildSchema("volt"),
+      this._cellSlot,
+    );
+    const rForm = this._appendAdvSection(
+      `Per-cell internal resistances (1..${N})`,
+      buildSchema("ohm"),
+      this._cellSlot,
+    );
+    this._cellForms = [vForm, rForm];
   }
 
   _updateTabs() {
@@ -671,6 +722,11 @@ class BatteryPackCardEditor extends HTMLElement {
       this._basicForm.schema = BASIC_SCHEMA;
       this._basicForm.data = { ...DEFAULTS, ...this._config };
     } else {
+      const N = Math.max(1, Math.min(32, parseInt(this._config.cells, 10) || 16));
+      if (N !== this._lastCellsN) {
+        this._rebuildCellSections(N);
+        this._lastCellsN = N;
+      }
       for (const f of this._advForms) {
         f.hass = this._hass;
         f.data = this._config;
