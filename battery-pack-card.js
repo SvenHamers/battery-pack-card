@@ -15,7 +15,7 @@
  * Click any element to open the matching entity's more-info dialog.
  */
 
-const VERSION = "1.3.0";
+const VERSION = "1.3.1";
 
 const DEFAULTS = {
   name: "",
@@ -314,11 +314,11 @@ class BatteryPackCard extends HTMLElement {
     const balAllow = this._on(E.balAllow);
     const heatOn = this._on(E.heat);
 
-    // Convention: positive power = charging (current flowing INTO the battery),
-    // matching JK-BMS and most modern BMS integrations.
+    // Direction comes from the current sensor (signed) — some BMS integrations
+    // report power as unsigned magnitude, so current is the source of truth.
     let powerDir = "idle", powerColor = "var(--clr-grey)";
-    if (powW > 5)  { powerDir = "charging";    powerColor = "var(--clr-green)"; }
-    if (powW < -5) { powerDir = "discharging"; powerColor = "var(--clr-orange)"; }
+    if (curA > 0.1)  { powerDir = "charging";    powerColor = "var(--clr-green)"; }
+    if (curA < -0.1) { powerDir = "discharging"; powerColor = "var(--clr-orange)"; }
     const socColor = soc > 50 ? "var(--clr-green)" : soc > 20 ? "var(--clr-orange)" : "var(--clr-red)";
 
     this._root.innerHTML = `

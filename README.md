@@ -151,7 +151,7 @@ entity_cell_5_volt: sensor.special_probe_for_cell_5    # one-off override on top
 
 ## Conventions
 
-- **Power sign:** positive = charging (energy into the battery), negative = discharging. This matches JK-BMS and most modern BMS integrations.
+- **Charge / discharge direction:** derived from the **current** sensor, not power. Many BMS integrations report power as an unsigned magnitude, so the card uses current's sign: positive current = charging (energy into the battery), negative = discharging. Make sure `entity_current` points at a signed sensor.
 - **Cell colouring:** cells are tinted by their offset from the pack's average voltage — green ≤ 2 mV, yellow ≤ 5, orange ≤ 10, red beyond. The lowest and highest cells get a red and green halo respectively.
 - **Click-to-detail:** every visible element (battery, stat tile, pill, individual cell, temperature tile, alarm badge) opens HA's standard entity-detail dialog.
 - **Read-only:** the card never writes to the BMS. All `number.*` and `switch.*` settings entities are deliberately ignored.
