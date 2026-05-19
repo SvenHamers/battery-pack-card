@@ -15,7 +15,7 @@
  * Click any element to open the matching entity's more-info dialog.
  */
 
-const VERSION = "1.3.2";
+const VERSION = "1.3.2-beta.2";
 
 const DEFAULTS = {
   name: "",
@@ -564,7 +564,7 @@ class BatteryPackCard extends HTMLElement {
       .cell  {
         position: relative; padding: 8px 4px 6px; text-align: center;
         background: rgba(76,175,80,0.18); border: 1px solid rgba(255,255,255,0.08);
-        border-radius: 7px; transition: transform 0.15s;
+        border-radius: 7px; transition: filter 0.15s, box-shadow 0.15s;
       }
       .cell::before, .cell::after {
         content: ""; position: absolute; top: -3px; width: 12%; height: 4px;
@@ -572,7 +572,7 @@ class BatteryPackCard extends HTMLElement {
       }
       .cell::before { left: 28%; }
       .cell::after  { right: 28%; }
-      .cell:hover { transform: translateY(-2px); }
+      .cell:hover { filter: brightness(1.15); box-shadow: 0 2px 6px rgba(0,0,0,0.35); }
       .cell.soft { background: rgba(255,193,7,0.18); }
       .cell.warn { background: rgba(255,152,0,0.22); }
       .cell.bad  { background: rgba(239,83,80,0.28); }
