@@ -15,7 +15,7 @@
  * Click any element to open the matching entity's more-info dialog.
  */
 
-const VERSION = "1.3.2-beta.3";
+const VERSION = "1.3.2-beta.4";
 
 const DEFAULTS = {
   name: "",
@@ -262,7 +262,15 @@ class BatteryPackCard extends HTMLElement {
 
   set hass(hass) {
     this._hass = hass;
-    this._render();
+    // Coalesce bursts of state-changed events into one render per frame.
+    // Without this, every BMS entity update triggers a full innerHTML replace
+    // — when paired with CSS hover transitions, that creates a visible flicker.
+    if (this._rafPending) return;
+    this._rafPending = true;
+    requestAnimationFrame(() => {
+      this._rafPending = false;
+      this._render();
+    });
   }
 
   getCardSize() {
@@ -540,13 +548,13 @@ class BatteryPackCard extends HTMLElement {
       .hero  { display:flex; gap: 16px; align-items: stretch; }
       .battery { flex: 0 0 130px; height: 250px; filter: drop-shadow(0 4px 12px rgba(0,0,0,0.25)); }
       .stats { flex: 1; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; align-content: start; }
-      .stat  { padding: 8px 12px; background: rgba(255,255,255,0.035); border-left: 3px solid var(--clr-grey); border-radius: 7px; transition: background 0.15s; }
+      .stat  { padding: 8px 12px; background: rgba(255,255,255,0.035); border-left: 3px solid var(--clr-grey); border-radius: 7px; }
       .stat:hover { background: rgba(255,255,255,0.07); }
       .stat-label { font-size: 10px; letter-spacing: 1.2px; opacity: 0.7; }
       .stat-value { font-size: 18px; font-weight: 600; margin-top: 2px; font-variant-numeric: tabular-nums; }
 
       .pills { display:flex; flex-wrap:wrap; gap: 6px; }
-      .pill  { padding: 5px 11px; border-radius: 14px; font-size: 12px; font-weight: 500; letter-spacing: 0.2px; transition: filter 0.15s; }
+      .pill  { padding: 5px 11px; border-radius: 14px; font-size: 12px; font-weight: 500; letter-spacing: 0.2px; }
       .pill:hover { filter: brightness(1.15); }
       .pill b { margin-left: 4px; font-weight: 700; }
       .pill-on     { color: var(--clr-green);  background: rgba(76,175,80,0.13); }
@@ -564,7 +572,7 @@ class BatteryPackCard extends HTMLElement {
       .cell  {
         position: relative; padding: 8px 4px 6px; text-align: center;
         background: rgba(76,175,80,0.18); border: 1px solid rgba(255,255,255,0.08);
-        border-radius: 7px; transition: filter 0.15s;
+        border-radius: 7px;
       }
       .cell::before, .cell::after {
         content: ""; position: absolute; top: -3px; width: 12%; height: 4px;
@@ -584,11 +592,11 @@ class BatteryPackCard extends HTMLElement {
 
       .cell-summary { display:flex; justify-content:space-between; flex-wrap:wrap; gap:6px; font-size:12px; padding: 4px 2px 0; }
       .cell-summary .muted { opacity: 0.5; margin-left: 3px; }
-      .cell-summary span { padding: 2px 6px; border-radius: 4px; transition: background 0.15s; }
+      .cell-summary span { padding: 2px 6px; border-radius: 4px; }
       .cell-summary span:hover { background: rgba(255,255,255,0.04); }
 
       .temps { display: grid; grid-template-columns: repeat(5, 1fr); gap: 5px; }
-      .temp  { padding: 8px 6px; background: rgba(255,255,255,0.03); border-radius: 7px; text-align: center; transition: background 0.15s; }
+      .temp  { padding: 8px 6px; background: rgba(255,255,255,0.03); border-radius: 7px; text-align: center; }
       .temp:hover { background: rgba(255,255,255,0.07); }
       .temp-label { font-size: 10px; opacity: 0.6; letter-spacing: 0.5px; }
       .temp-val   { font-size: 16px; font-weight: 700; font-variant-numeric: tabular-nums; }
