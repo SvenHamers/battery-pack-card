@@ -15,7 +15,7 @@
  * Click any element to open the matching entity's more-info dialog.
  */
 
-const VERSION = "1.3.1";
+const VERSION = "1.3.2";
 
 const DEFAULTS = {
   name: "",
@@ -28,6 +28,11 @@ const DEFAULTS = {
   show_cells: true,
   show_summary: true,
   show_temperatures: true,
+  cell_voltage_from: "V",
+  cell_voltage_decimals: 3,
+  cell_resistance_from: "ohm",
+  cell_resistance_decimals: 0,
+  cells_min_width: 60,
 };
 
 const BASIC_SCHEMA = [
@@ -103,10 +108,38 @@ const ADVANCED_SECTIONS = [
     ],
   },
   {
-    title: "Cells (use {n} placeholder for cell index 1..N)",
+    title: "Cells (use {n} or {nn} placeholder for cell index 1..N)",
     schema: [
       { name: "cell_voltage_pattern",    selector: { text: {} } },
       { name: "cell_resistance_pattern", selector: { text: {} } },
+    ],
+  },
+  {
+    title: "Display",
+    schema: [
+      {
+        type: "grid",
+        name: "",
+        schema: [
+          {
+            name: "cell_voltage_from",
+            selector: { select: { options: [
+              { value: "V",  label: "V (volts)" },
+              { value: "mV", label: "mV (millivolts)" },
+            ], mode: "dropdown" } },
+          },
+          { name: "cell_voltage_decimals", selector: { number: { min: 0, max: 6, step: 1, mode: "box" } } },
+          {
+            name: "cell_resistance_from",
+            selector: { select: { options: [
+              { value: "ohm",  label: "Ω (ohms)" },
+              { value: "mohm", label: "mΩ (milliohms)" },
+            ], mode: "dropdown" } },
+          },
+          { name: "cell_resistance_decimals", selector: { number: { min: 0, max: 4, step: 1, mode: "box" } } },
+          { name: "cells_min_width", selector: { number: { min: 30, max: 200, step: 1, mode: "box" } } },
+        ],
+      },
     ],
   },
 ];
@@ -151,8 +184,13 @@ const LABELS = {
   entity_temp_probe_2: "Probe 2 temperature",
   entity_temp_probe_3: "Probe 3 temperature",
   entity_temp_probe_4: "Probe 4 temperature",
-  cell_voltage_pattern: "Cell voltage pattern (uses {n})",
-  cell_resistance_pattern: "Cell resistance pattern (uses {n})",
+  cell_voltage_pattern: "Cell voltage pattern (uses {n} or {nn})",
+  cell_resistance_pattern: "Cell resistance pattern (uses {n} or {nn})",
+  cell_voltage_from: "Cell voltage source unit",
+  cell_voltage_decimals: "Cell voltage decimals",
+  cell_resistance_from: "Cell resistance source unit",
+  cell_resistance_decimals: "Cell resistance decimals (mΩ)",
+  cells_min_width: "Cell tile min width (px)",
 };
 
 const fmt = (n, d = 0) => {
@@ -165,6 +203,18 @@ const fmt = (n, d = 0) => {
 
 const orNull = (v) => (typeof v === "string" && v.trim() ? v : null);
 const pick   = (override, fallback) => orNull(override) || fallback || null;
+
+// Source-unit → volts scale factor. Accepts "V" / "mV" (case-insensitive).
+const voltScale = (s) => (String(s || "V").toLowerCase() === "mv" ? 0.001 : 1);
+// Source-unit → ohms scale factor. Accepts "ohm" / "mohm" / "Ω" / "mΩ".
+const ohmScale = (s) => {
+  const k = String(s || "ohm").toLowerCase();
+  return (k === "mohm" || k === "mω") ? 0.001 : 1;
+};
+const intOr = (v, d) => {
+  const n = parseInt(v, 10);
+  return Number.isFinite(n) && n >= 0 ? n : d;
+};
 
 // ─── Main card ─────────────────────────────────────────────────────────────
 class BatteryPackCard extends HTMLElement {
@@ -275,10 +325,14 @@ class BatteryPackCard extends HTMLElement {
     // 1. explicit per-cell override wins
     const explicit = orNull(c[`entity_cell_${n}_${suffix}`]);
     if (explicit) return explicit;
-    // 2. pattern with {n} placeholder
+    // 2. pattern with {n} / {nn} placeholders
     const patternKey = kind === "v" ? "cell_voltage_pattern" : "cell_resistance_pattern";
     const pat = orNull(c[patternKey]);
-    if (pat) return pat.replace("{n}", n);
+    if (pat) {
+      return pat
+        .replace(/\{nn\}/g, String(n).padStart(2, "0"))
+        .replace(/\{n\}/g, n);
+    }
     // 3. prefix-derived default
     if (!c.prefix) return null;
     return `sensor.${c.prefix}_cell_${n}_${suffix}`;
@@ -299,10 +353,14 @@ class BatteryPackCard extends HTMLElement {
     const capRem= this._num(E.capRem);
     const capTot= this._num(E.capTot);
     const runtime= this._state(E.runtime) || "";
-    const vAvg  = this._num(E.vAvg);
-    const vMin  = this._num(E.vMin);
-    const vMax  = this._num(E.vMax);
-    const vDelta= this._num(E.vDelta);
+    const vSc   = voltScale(cfg.cell_voltage_from);
+    const rSc   = ohmScale(cfg.cell_resistance_from);
+    const vDec  = intOr(cfg.cell_voltage_decimals, 3);
+    const rDec  = intOr(cfg.cell_resistance_decimals, 0);
+    const vAvg  = this._num(E.vAvg)  * vSc;
+    const vMin  = this._num(E.vMin)  * vSc;
+    const vMax  = this._num(E.vMax)  * vSc;
+    const vDelta= this._num(E.vDelta) * vSc;
     const minCell = parseInt(this._state(E.minCell) || "0", 10);
     const maxCell = parseInt(this._state(E.maxCell) || "0", 10);
     const phase = this._state(E.phase) || "—";
@@ -354,13 +412,13 @@ class BatteryPackCard extends HTMLElement {
 
       ${cfg.show_cells ? `
         <div class="section-label">CELLS — voltage and resistance, colour = mV from pack avg</div>
-        <div class="cells">${this._renderCells(cfg.cells, vAvg, minCell, maxCell)}</div>` : ""}
+        <div class="cells" style="--cell-min-w:${intOr(cfg.cells_min_width, 60)}px">${this._renderCells(cfg.cells, vAvg, minCell, maxCell, vSc, vDec, rSc, rDec)}</div>` : ""}
 
       ${cfg.show_summary ? `
         <div class="cell-summary">
-          <span ${this._dataE(E.vMin)}><b style="color:var(--clr-red)">${fmt(vMin, 3)}</b> V <span class="muted">min #${minCell}</span></span>
-          <span ${this._dataE(E.vAvg)}><b>${fmt(vAvg, 3)}</b> V <span class="muted">avg</span></span>
-          <span ${this._dataE(E.vMax)}><b style="color:var(--clr-green)">${fmt(vMax, 3)}</b> V <span class="muted">max #${maxCell}</span></span>
+          <span ${this._dataE(E.vMin)}><b style="color:var(--clr-red)">${fmt(vMin, vDec)}</b> V <span class="muted">min #${minCell}</span></span>
+          <span ${this._dataE(E.vAvg)}><b>${fmt(vAvg, vDec)}</b> V <span class="muted">avg</span></span>
+          <span ${this._dataE(E.vMax)}><b style="color:var(--clr-green)">${fmt(vMax, vDec)}</b> V <span class="muted">max #${maxCell}</span></span>
           <span ${this._dataE(E.vDelta)}><b style="color:${vDelta * 1000 < 5 ? "var(--clr-green)" : vDelta * 1000 < 15 ? "var(--clr-amber)" : "var(--clr-red)"}">${fmt(vDelta * 1000, 0)}</b> mV <span class="muted">Δ</span></span>
         </div>` : ""}
 
@@ -415,13 +473,13 @@ class BatteryPackCard extends HTMLElement {
     return `<span class="pill pill-${status}" ${this._dataE(entityId)} role="button">${this._esc(label)} <b>${this._esc(value)}</b></span>`;
   }
 
-  _renderCells(N, vAvg, minCell, maxCell) {
+  _renderCells(N, vAvg, minCell, maxCell, vSc, vDec, rSc, rDec) {
     let out = "";
     for (let n = 1; n <= N; n++) {
       const ev = this._cellEntity("v", n);
       const er = this._cellEntity("r", n);
-      const v = this._num(ev);
-      const r = this._num(er);
+      const v = this._num(ev) * vSc;       // → volts
+      const r = this._num(er) * rSc;       // → ohms
       const devMv = Math.abs((v - vAvg) * 1000);
       let cls = "ok";
       if (devMv > 10) cls = "bad";
@@ -431,8 +489,8 @@ class BatteryPackCard extends HTMLElement {
       out += `
         <div class="cell ${cls} ${tag}" ${this._dataE(ev)} role="button">
           <div class="cell-n">#${n}</div>
-          <div class="cell-v">${fmt(v, 3)}</div>
-          <div class="cell-r">${fmt(r * 1000, 0)} mΩ</div>
+          <div class="cell-v">${fmt(v, vDec)}</div>
+          <div class="cell-r">${fmt(r * 1000, rDec)} mΩ</div>
         </div>
       `;
     }
@@ -462,11 +520,12 @@ class BatteryPackCard extends HTMLElement {
   _css() {
     return `
       :host {
+        display: block;
         --clr-green:  #4caf50; --clr-amber:  #ffc107; --clr-orange: #ff9800;
         --clr-red:    #ef5350; --clr-blue:   #42a5f5; --clr-cyan:   #00bcd4;
         --clr-purple: #ab47bc; --clr-grey:   #9e9e9e;
       }
-      ha-card { padding: 18px 18px 14px; }
+      ha-card { display: block; padding: 18px 18px 14px; }
       #body { display: flex; flex-direction: column; gap: 12px; }
       [data-entity] { cursor: pointer; }
       [data-entity]:focus-visible { outline: 2px solid var(--clr-blue); outline-offset: 2px; }
@@ -497,8 +556,11 @@ class BatteryPackCard extends HTMLElement {
 
       .section-label { font-size: 10px; letter-spacing: 1.5px; opacity: 0.55; margin-top: 4px; }
 
-      .cells { display: grid; grid-template-columns: repeat(8, 1fr); gap: 5px; }
-      @media (max-width: 520px) { .cells { grid-template-columns: repeat(4, 1fr); } }
+      .cells {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(var(--cell-min-w, 60px), 1fr));
+        gap: 5px;
+      }
       .cell  {
         position: relative; padding: 8px 4px 6px; text-align: center;
         background: rgba(76,175,80,0.18); border: 1px solid rgba(255,255,255,0.08);

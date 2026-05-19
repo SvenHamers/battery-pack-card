@@ -1,0 +1,312 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Battery Pack Card — Local Test Harness</title>
+  <style>
+    html, body { margin: 0; height: 100%; }
+    body {
+      font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+      background: #121212; color: #eee;
+      display: grid; grid-template-columns: 320px 1fr; min-height: 100vh;
+    }
+    .panel {
+      padding: 16px; background: #1a1a1a; border-right: 1px solid #2a2a2a;
+      overflow-y: auto; max-height: 100vh; box-sizing: border-box;
+    }
+    .panel h2 {
+      font-size: 12px; margin: 0 0 12px;
+      opacity: 0.55; letter-spacing: 1.5px; text-transform: uppercase;
+    }
+    .panel label {
+      display: block; margin: 12px 0 4px;
+      font-size: 11px; opacity: 0.7; text-transform: uppercase; letter-spacing: 0.6px;
+    }
+    .panel input, .panel select, .panel button {
+      width: 100%; padding: 7px 8px; background: #222; color: #eee;
+      border: 1px solid #383838; border-radius: 4px;
+      font-family: inherit; font-size: 13px; box-sizing: border-box;
+    }
+    .panel input[type="range"] { padding: 0; }
+    .panel button {
+      cursor: pointer; margin-top: 16px;
+      background: #2a2a2a; border-color: #444;
+    }
+    .panel button:hover { background: #333; }
+    .hint { font-size: 11px; opacity: 0.45; margin-top: 4px; line-height: 1.4; }
+    .stage { padding: 24px; overflow: auto; }
+    .frame {
+      background: #1c1c1c; border-radius: 12px;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.4);
+      margin: 0 auto; transition: max-width 0.15s;
+      min-height: 80px;
+    }
+    .err {
+      padding: 16px; color: #ef5350; font-family: ui-monospace, monospace;
+      font-size: 12px; white-space: pre-wrap; word-break: break-word;
+    }
+    /* Minimal ha-card shim so the card has somewhere to render. */
+    ha-card { display: block; }
+    .version {
+      font-size: 10px; opacity: 0.4; margin-top: 18px;
+      padding-top: 12px; border-top: 1px solid #2a2a2a;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="panel">
+    <h2>Test Harness</h2>
+
+    <label for="vfrom">Cell voltage source</label>
+    <select id="vfrom">
+      <option value="V" selected>V (volts)</option>
+      <option value="mV">mV (millivolts)</option>
+    </select>
+    <div class="hint">Switch to mV to reproduce the Gobel overflow bug — entities report e.g. 3250 instead of 3.250.</div>
+
+    <label for="cells">Cells</label>
+    <input type="number" id="cells" min="4" max="32" value="16">
+
+    <label for="vdec">Voltage decimals</label>
+    <input type="number" id="vdec" min="0" max="6" value="3">
+
+    <label for="rdec">Resistance decimals</label>
+    <input type="number" id="rdec" min="0" max="4" value="0">
+
+    <label for="minw">Cell tile min width (px)</label>
+    <input type="number" id="minw" min="30" max="200" value="60">
+
+    <label for="pad">Pattern style</label>
+    <select id="pad">
+      <option value="nn" selected>{nn} — zero-padded (01, 02, …)</option>
+      <option value="n">{n} — unpadded (1, 2, …)</option>
+    </select>
+    <div class="hint">Entities are generated with the chosen padding. If the pattern doesn't match the entity names, the affected cells render 0.</div>
+
+    <label for="width">Card width (test responsive)</label>
+    <input type="range" id="width" min="280" max="900" value="600">
+    <div class="hint" id="width-val">600 px</div>
+
+    <label for="bad">Inject deviation on cell #7</label>
+    <select id="bad">
+      <option value="0" selected>None</option>
+      <option value="3">+3 mV (soft yellow)</option>
+      <option value="7">+7 mV (warn orange)</option>
+      <option value="20">+20 mV (bad red)</option>
+    </select>
+
+    <label for="alarm">Alarm active</label>
+    <select id="alarm">
+      <option value="0" selected>No</option>
+      <option value="1">Yes</option>
+    </select>
+
+    <button id="reset">Reset to defaults</button>
+
+    <div class="version">
+      Tweak any control or pass URL params: <code>?from=mV&amp;cells=24&amp;width=400</code>
+    </div>
+  </div>
+
+  <div class="stage">
+    <div class="frame" id="frame"></div>
+  </div>
+
+  <script src="../battery-pack-card.js"></script>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const frame = $("frame");
+    let card = null;
+
+    const pad = (n, padded) => padded ? String(n).padStart(2, "0") : String(n);
+
+    function buildHass(opts) {
+      const states = {};
+      const set = (id, val, unit) => {
+        states[id] = {
+          state: String(val),
+          attributes: unit ? { unit_of_measurement: unit } : {},
+        };
+      };
+
+      const scale = opts.vfrom === "mV" ? 1000 : 1;
+      const dp = opts.vfrom === "mV" ? 0 : 4;
+      const baseV = 3.250;
+
+      const minIdx = 3, maxIdx = 12, minDelta = -0.007, maxDelta = 0.008;
+
+      const padded = opts.pad === "nn";
+      for (let i = 1; i <= opts.cells; i++) {
+        const idx = pad(i, padded);
+        let v = baseV + ((i % 5) - 2) * 0.001;
+        if (i === minIdx) v = baseV + minDelta;
+        if (i === maxIdx) v = baseV + maxDelta;
+        if (i === 7 && opts.bad > 0) v = baseV + opts.bad / 1000;
+        set(`sensor.test_cell_voltage_${idx}`, (v * scale).toFixed(dp), opts.vfrom);
+        set(`sensor.test_cell_resistance_${idx}`, "0.00045", "Ω");
+      }
+
+      set("sensor.test_soc", "78");
+      set("sensor.test_soh", "98");
+      set("sensor.test_pack_voltage", "52.0", "V");
+      set("sensor.test_current", "12.5", "A");
+      set("sensor.test_power", "650", "W");
+      set("sensor.test_balance_current", "0.05", "A");
+      set("sensor.test_cycles", "127");
+      set("sensor.test_cap_rem", "180.4", "Ah");
+      set("sensor.test_cap_tot", "200", "Ah");
+      set("sensor.test_runtime", "14h 30m");
+      set("sensor.test_phase", "Bulk");
+
+      set("sensor.test_v_min",   ((baseV + minDelta) * scale).toFixed(dp), opts.vfrom);
+      set("sensor.test_v_max",   ((baseV + maxDelta) * scale).toFixed(dp), opts.vfrom);
+      set("sensor.test_v_avg",   (baseV * scale).toFixed(dp), opts.vfrom);
+      set("sensor.test_v_delta", ((maxDelta - minDelta) * scale).toFixed(dp), opts.vfrom);
+      set("sensor.test_min_cell", String(minIdx));
+      set("sensor.test_max_cell", String(maxIdx));
+
+      set("sensor.test_alarm_status", opts.alarm ? "Overvoltage" : "Normal");
+      set("binary_sensor.test_alarm_active",   opts.alarm ? "on" : "off");
+      set("binary_sensor.test_switch_charge",  "on");
+      set("binary_sensor.test_switch_discharge", "on");
+      set("binary_sensor.test_switch_balance", "on");
+      set("binary_sensor.test_balance_active", "off");
+      set("binary_sensor.test_heating",        "off");
+
+      set("sensor.test_temp_mos", "32.5");
+      set("sensor.test_temp_p1",  "24.0");
+      set("sensor.test_temp_p2",  "23.8");
+      set("sensor.test_temp_p3",  "24.1");
+      set("sensor.test_temp_p4",  "23.9");
+
+      return { states };
+    }
+
+    function buildConfig(opts) {
+      const placeholder = opts.pad === "nn" ? "{nn}" : "{n}";
+      return {
+        name: "Test Pack",
+        cells: opts.cells,
+        cell_voltage_from: opts.vfrom,
+        cell_voltage_decimals: opts.vdec,
+        cell_resistance_decimals: opts.rdec,
+        cells_min_width: opts.minw,
+        cell_voltage_pattern:    `sensor.test_cell_voltage_${placeholder}`,
+        cell_resistance_pattern: `sensor.test_cell_resistance_${placeholder}`,
+        entity_soc: "sensor.test_soc",
+        entity_soh: "sensor.test_soh",
+        entity_pack_voltage: "sensor.test_pack_voltage",
+        entity_current: "sensor.test_current",
+        entity_power: "sensor.test_power",
+        entity_balance_current: "sensor.test_balance_current",
+        entity_cycles: "sensor.test_cycles",
+        entity_capacity_remaining: "sensor.test_cap_rem",
+        entity_capacity_total: "sensor.test_cap_tot",
+        entity_runtime: "sensor.test_runtime",
+        entity_charge_phase: "sensor.test_phase",
+        entity_cell_voltage_min:   "sensor.test_v_min",
+        entity_cell_voltage_max:   "sensor.test_v_max",
+        entity_cell_voltage_avg:   "sensor.test_v_avg",
+        entity_cell_voltage_delta: "sensor.test_v_delta",
+        entity_cell_min_number:    "sensor.test_min_cell",
+        entity_cell_max_number:    "sensor.test_max_cell",
+        entity_alarm_status:    "sensor.test_alarm_status",
+        entity_alarm_active:    "binary_sensor.test_alarm_active",
+        entity_switch_charge:   "binary_sensor.test_switch_charge",
+        entity_switch_discharge:"binary_sensor.test_switch_discharge",
+        entity_switch_balance:  "binary_sensor.test_switch_balance",
+        entity_balance_active:  "binary_sensor.test_balance_active",
+        entity_heating:         "binary_sensor.test_heating",
+        entity_temp_mos:     "sensor.test_temp_mos",
+        entity_temp_probe_1: "sensor.test_temp_p1",
+        entity_temp_probe_2: "sensor.test_temp_p2",
+        entity_temp_probe_3: "sensor.test_temp_p3",
+        entity_temp_probe_4: "sensor.test_temp_p4",
+      };
+    }
+
+    const URL_MAP = {
+      from: "vfrom", cells: "cells", vdec: "vdec", rdec: "rdec",
+      minw: "minw", pad: "pad", width: "width", bad: "bad", alarm: "alarm",
+    };
+
+    function applyUrlParams() {
+      const url = new URL(location.href);
+      for (const [k, id] of Object.entries(URL_MAP)) {
+        const v = url.searchParams.get(k);
+        if (v !== null && $(id)) $(id).value = v;
+      }
+    }
+
+    function readOpts() {
+      return {
+        vfrom: $("vfrom").value,
+        cells: parseInt($("cells").value, 10),
+        vdec:  parseInt($("vdec").value, 10),
+        rdec:  parseInt($("rdec").value, 10),
+        minw:  parseInt($("minw").value, 10),
+        pad:   $("pad").value,
+        width: parseInt($("width").value, 10),
+        bad:   parseInt($("bad").value, 10),
+        alarm: parseInt($("alarm").value, 10),
+      };
+    }
+
+    function showError(msg) {
+      frame.innerHTML = `<div class="err">${msg}</div>`;
+      card = null;
+    }
+
+    function render() {
+      try {
+        const opts = readOpts();
+        $("width-val").textContent = `${opts.width} px`;
+        frame.style.maxWidth = `${opts.width}px`;
+
+        if (!customElements.get("battery-pack-card")) {
+          showError("battery-pack-card custom element is not registered.\nCheck ../battery-pack-card.js loaded (Network tab) and that customElements.define ran.");
+          return;
+        }
+
+        if (!card) {
+          card = document.createElement("battery-pack-card");
+          frame.innerHTML = "";
+          frame.appendChild(card);
+        }
+        card.setConfig(buildConfig(opts));
+        card.hass = buildHass(opts);
+      } catch (e) {
+        console.error(e);
+        showError(`Render error: ${e.message}\n\n${e.stack || ""}`);
+      }
+    }
+
+    window.addEventListener("error", (e) => {
+      showError(`Uncaught: ${e.message}\n  at ${e.filename}:${e.lineno}:${e.colno}`);
+    });
+
+    const HARNESS_DEFAULTS = {
+      vfrom: "V", cells: 16, vdec: 3, rdec: 0, minw: 60,
+      pad: "nn", width: 600, bad: "0", alarm: "0",
+    };
+
+    function init() {
+      applyUrlParams();
+      document.querySelectorAll(".panel input, .panel select").forEach((el) => {
+        el.addEventListener("input", render);
+        el.addEventListener("change", render);
+      });
+      $("reset").addEventListener("click", () => {
+        for (const [k, v] of Object.entries(HARNESS_DEFAULTS)) {
+          if ($(k)) $(k).value = v;
+        }
+        render();
+      });
+      render();
+    }
+
+    customElements.whenDefined("battery-pack-card").then(init);
+  </script>
+</body>
+</html>

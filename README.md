@@ -126,28 +126,40 @@ In the dashboard editor open the card's "Edit" dialog and switch to the **Advanc
 For each cell `n` (1..`cells`) the card resolves the voltage and resistance entities in this order:
 
 1. **Explicit per-cell override** — `entity_cell_<n>_volt` / `entity_cell_<n>_ohm`
-2. **Pattern shortcut** — `cell_voltage_pattern` / `cell_resistance_pattern`, with `{n}` substituted by the cell index
+2. **Pattern shortcut** — `cell_voltage_pattern` / `cell_resistance_pattern`, with `{n}` or `{nn}` substituted by the cell index
 3. **Prefix default** — `sensor.<prefix>_cell_<n>_volt` / `sensor.<prefix>_cell_<n>_ohm`
 
 | Key                              | Description                                                  |
 | -------------------------------- | ------------------------------------------------------------ |
 | `entity_cell_<n>_volt`           | Voltage entity for cell `<n>`. Takes precedence over pattern and prefix default. |
 | `entity_cell_<n>_ohm`            | Internal resistance entity for cell `<n>`.                   |
-| `cell_voltage_pattern`           | Pattern for every cell's voltage entity. `{n}` is replaced by the cell index. |
+| `cell_voltage_pattern`           | Pattern for every cell's voltage entity. `{n}` → `1..N`, `{nn}` → `01..NN`. |
 | `cell_resistance_pattern`        | Pattern for every cell's resistance entity.                  |
 
-The Advanced tab shows individual entity-pickers for cells 1..N (changes when you adjust `cells`).
+The Advanced tab shows individual entity-pickers for cells 1..N (changes when you adjust `cells`). **If your BMS uses an entity-naming scheme the patterns can't express** (e.g. mixed prefixes, hex indices, vendor-specific names), the per-cell fields are the bulletproof path — they accept any entity ID.
 
-Example — use the BMS addon for most things, a shunt for power, and a custom cell naming:
+Example — use the BMS addon for most things, a shunt for power, and a zero-padded cell name:
 
 ```yaml
 type: custom:battery-pack-card
 name: My pack
 prefix: bms_a
-entity_power: sensor.shunt_power                       # use shunt instead of BMS-reported W
-cell_voltage_pattern: sensor.bms_a_cell{n}_voltage     # different cell naming
-entity_cell_5_volt: sensor.special_probe_for_cell_5    # one-off override on top of the pattern
+entity_power: sensor.shunt_power                              # use shunt instead of BMS-reported W
+cell_voltage_pattern: sensor.bms_a_view_cell_voltage_{nn}     # 01..16 zero-padded
+entity_cell_5_volt: sensor.special_probe_for_cell_5           # one-off override on top of the pattern
 ```
+
+### Display
+
+The card stores voltages internally in V and resistances in Ω. If your BMS exposes the cell entities in different units (e.g. millivolts), set the source unit so the card normalizes before formatting — otherwise numbers will be 1000× too big and overflow the cell tiles.
+
+| Key                          | Default | Description                                                  |
+| ---------------------------- | ------- | ------------------------------------------------------------ |
+| `cell_voltage_from`          | `V`     | Source unit for cell voltages: `V` or `mV`.                  |
+| `cell_voltage_decimals`      | `3`     | Decimals shown for cell and summary voltages.                |
+| `cell_resistance_from`       | `ohm`   | Source unit for cell resistances: `ohm` or `mohm`.           |
+| `cell_resistance_decimals`   | `0`     | Decimals shown for the mΩ readout under each cell.           |
+| `cells_min_width`            | `60`    | Minimum cell-tile width in px. The grid auto-fits as many columns as fit; cells wrap to new rows when the card is narrower. |
 
 ## Conventions
 
