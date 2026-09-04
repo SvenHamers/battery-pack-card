@@ -64,7 +64,7 @@ If you use the JK-BMS RS485 addon, `prefix` is the only required field.
 | `show_pills`        | bool    | `true`                      | Show charge / discharge / balance / heater status pills.      |
 | `show_cells`        | bool    | `true`                      | Show the per-cell voltage + resistance grid.                  |
 | `show_summary`      | bool    | `true`                      | Show the min / avg / max / Δ summary line.                    |
-| `show_temperatures` | bool    | `true`                      | Show the MOSFET + 4-probe temperature strip.                  |
+| `show_temperatures` | bool    | `true`                      | Show the temperature strip (MOSFET + up to 4 probes). Tiles whose sensor doesn't exist are hidden. |
 
 ## Advanced configuration
 
@@ -121,6 +121,8 @@ In the dashboard editor open the card's "Edit" dialog and switch to the **Advanc
 | `entity_temp_probe_3`        | `sensor.X_sonde_3_temp`                      | External probe 3 temp.       |
 | `entity_temp_probe_4`        | `sensor.X_sonde_4_temp`                      | External probe 4 temp.       |
 
+Only sensors that actually exist in Home Assistant get a tile; the remaining tiles share the row. So a BMS with just a MOSFET sensor and two probes shows three tiles, not five with 0° fillers. A sensor that exists but is `unavailable` shows `—`.
+
 ### Per-cell entities
 
 For each cell `n` (1..`cells`) the card resolves the voltage and resistance entities in this order:
@@ -155,11 +157,13 @@ The card stores voltages internally in V and resistances in Ω. If your BMS expo
 
 | Key                          | Default | Description                                                  |
 | ---------------------------- | ------- | ------------------------------------------------------------ |
-| `cell_voltage_from`          | `V`     | Source unit for cell voltages: `V` or `mV`.                  |
+| `cell_voltage_from`          | `V`     | Source unit for the per-cell voltage entities: `V` or `mV`.  |
+| `summary_voltage_from`       | *(same as cells)* | Source unit for the min / avg / max / Δ entities, if your BMS reports those in a different unit than the cells. |
 | `cell_voltage_decimals`      | `3`     | Decimals shown for cell and summary voltages.                |
 | `cell_resistance_from`       | `ohm`   | Source unit for cell resistances: `ohm` or `mohm`.           |
 | `cell_resistance_decimals`   | `0`     | Decimals shown for the mΩ readout under each cell.           |
-| `cells_min_width`            | `60`    | Minimum cell-tile width in px. The grid auto-fits as many columns as fit; cells wrap to new rows when the card is narrower. |
+| `cells_max_columns`          | `8`     | Maximum cell tiles per row. 8 and 16-cell packs render as 1 or 2 full rows on any card wide enough. |
+| `cells_min_width`            | `48`    | Minimum cell-tile width in px. When the card is too narrow for `cells_max_columns` tiles of this width, the grid wraps to fewer columns. |
 
 ## Conventions
 

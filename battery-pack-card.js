@@ -15,7 +15,7 @@
  * Click any element to open the matching entity's more-info dialog.
  */
 
-const VERSION = "1.3.2-beta.4";
+const VERSION = "1.3.2";
 
 const DEFAULTS = {
   name: "",
@@ -29,10 +29,12 @@ const DEFAULTS = {
   show_summary: true,
   show_temperatures: true,
   cell_voltage_from: "V",
+  summary_voltage_from: "",      // "" = same as cell_voltage_from
   cell_voltage_decimals: 3,
   cell_resistance_from: "ohm",
   cell_resistance_decimals: 0,
-  cells_min_width: 60,
+  cells_min_width: 48,
+  cells_max_columns: 8,
 };
 
 const BASIC_SCHEMA = [
@@ -128,6 +130,13 @@ const ADVANCED_SECTIONS = [
               { value: "mV", label: "mV (millivolts)" },
             ], mode: "dropdown" } },
           },
+          {
+            name: "summary_voltage_from",
+            selector: { select: { options: [
+              { value: "V",  label: "V (volts)" },
+              { value: "mV", label: "mV (millivolts)" },
+            ], mode: "dropdown" } },
+          },
           { name: "cell_voltage_decimals", selector: { number: { min: 0, max: 6, step: 1, mode: "box" } } },
           {
             name: "cell_resistance_from",
@@ -137,7 +146,8 @@ const ADVANCED_SECTIONS = [
             ], mode: "dropdown" } },
           },
           { name: "cell_resistance_decimals", selector: { number: { min: 0, max: 4, step: 1, mode: "box" } } },
-          { name: "cells_min_width", selector: { number: { min: 30, max: 200, step: 1, mode: "box" } } },
+          { name: "cells_min_width",   selector: { number: { min: 30, max: 200, step: 1, mode: "box" } } },
+          { name: "cells_max_columns", selector: { number: { min: 1, max: 32, step: 1, mode: "box" } } },
         ],
       },
     ],
@@ -187,10 +197,12 @@ const LABELS = {
   cell_voltage_pattern: "Cell voltage pattern (uses {n} or {nn})",
   cell_resistance_pattern: "Cell resistance pattern (uses {n} or {nn})",
   cell_voltage_from: "Cell voltage source unit",
+  summary_voltage_from: "Min/avg/max/Δ source unit (blank = same as cells)",
   cell_voltage_decimals: "Cell voltage decimals",
   cell_resistance_from: "Cell resistance source unit",
   cell_resistance_decimals: "Cell resistance decimals (mΩ)",
   cells_min_width: "Cell tile min width (px)",
+  cells_max_columns: "Cell grid max columns",
 };
 
 const fmt = (n, d = 0) => {
@@ -285,6 +297,7 @@ class BatteryPackCard extends HTMLElement {
   }
 
   _state(eid) { return eid ? this._hass?.states[eid]?.state : undefined; }
+  _exists(eid){ return !!(eid && this._hass?.states[eid]); }
   _num(eid)   { const v = parseFloat(this._state(eid)); return Number.isFinite(v) ? v : 0; }
   _on(eid)    { return this._state(eid) === "on"; }
 
@@ -362,13 +375,16 @@ class BatteryPackCard extends HTMLElement {
     const capTot= this._num(E.capTot);
     const runtime= this._state(E.runtime) || "";
     const vSc   = voltScale(cfg.cell_voltage_from);
+    // Summary (min/avg/max/Δ) entities may come in a different unit than the
+    // per-cell entities; fall back to the cell unit when not set.
+    const sSc   = voltScale(orNull(cfg.summary_voltage_from) || cfg.cell_voltage_from);
     const rSc   = ohmScale(cfg.cell_resistance_from);
     const vDec  = intOr(cfg.cell_voltage_decimals, 3);
     const rDec  = intOr(cfg.cell_resistance_decimals, 0);
-    const vAvg  = this._num(E.vAvg)  * vSc;
-    const vMin  = this._num(E.vMin)  * vSc;
-    const vMax  = this._num(E.vMax)  * vSc;
-    const vDelta= this._num(E.vDelta) * vSc;
+    const vAvg  = this._num(E.vAvg)  * sSc;
+    const vMin  = this._num(E.vMin)  * sSc;
+    const vMax  = this._num(E.vMax)  * sSc;
+    const vDelta= this._num(E.vDelta) * sSc;
     const minCell = parseInt(this._state(E.minCell) || "0", 10);
     const maxCell = parseInt(this._state(E.maxCell) || "0", 10);
     const phase = this._state(E.phase) || "—";
@@ -379,6 +395,15 @@ class BatteryPackCard extends HTMLElement {
     const balAct = this._on(E.balAct);
     const balAllow = this._on(E.balAllow);
     const heatOn = this._on(E.heat);
+
+    // Temperature tiles: only for sensors that actually exist in HA. An
+    // unconfigured probe (or a prefix default that matches nothing) is
+    // dropped instead of rendering as a misleading 0°.
+    const tempTiles = [
+      ["MOS", E.tMos], ["Probe 1", E.t1], ["Probe 2", E.t2], ["Probe 3", E.t3], ["Probe 4", E.t4],
+    ].filter(([, eid]) => this._exists(eid))
+     .map(([label, eid]) => this._tempTile(label, eid))
+     .join("");
 
     // Direction comes from the current sensor (signed) — some BMS integrations
     // report power as unsigned magnitude, so current is the source of truth.
@@ -420,7 +445,7 @@ class BatteryPackCard extends HTMLElement {
 
       ${cfg.show_cells ? `
         <div class="section-label">CELLS — voltage and resistance, colour = mV from pack avg</div>
-        <div class="cells" style="--cell-min-w:${intOr(cfg.cells_min_width, 60)}px">${this._renderCells(cfg.cells, vAvg, minCell, maxCell, vSc, vDec, rSc, rDec)}</div>` : ""}
+        <div class="cells" style="--cell-min-w:${intOr(cfg.cells_min_width, 48)}px;--cell-max-cols:${Math.max(1, intOr(cfg.cells_max_columns, 8))}">${this._renderCells(cfg.cells, vAvg, minCell, maxCell, vSc, vDec, rSc, rDec)}</div>` : ""}
 
       ${cfg.show_summary ? `
         <div class="cell-summary">
@@ -430,15 +455,9 @@ class BatteryPackCard extends HTMLElement {
           <span ${this._dataE(E.vDelta)}><b style="color:${vDelta * 1000 < 5 ? "var(--clr-green)" : vDelta * 1000 < 15 ? "var(--clr-amber)" : "var(--clr-red)"}">${fmt(vDelta * 1000, 0)}</b> mV <span class="muted">Δ</span></span>
         </div>` : ""}
 
-      ${cfg.show_temperatures ? `
+      ${cfg.show_temperatures && tempTiles ? `
         <div class="section-label">TEMPERATURES</div>
-        <div class="temps">
-          ${this._tempTile("MOS",    this._num(E.tMos), E.tMos)}
-          ${this._tempTile("Probe 1", this._num(E.t1),  E.t1)}
-          ${this._tempTile("Probe 2", this._num(E.t2),  E.t2)}
-          ${this._tempTile("Probe 3", this._num(E.t3),  E.t3)}
-          ${this._tempTile("Probe 4", this._num(E.t4),  E.t4)}
-        </div>` : ""}
+        <div class="temps">${tempTiles}</div>` : ""}
 
       <div class="footer" ${this._dataE(E.runtime)}>Runtime ${this._esc(runtime)}</div>
     `;
@@ -488,7 +507,7 @@ class BatteryPackCard extends HTMLElement {
       const er = this._cellEntity("r", n);
       const v = this._num(ev) * vSc;       // → volts
       const r = this._num(er) * rSc;       // → ohms
-      const devMv = Math.abs((v - vAvg) * 1000);
+      const devMv = Math.round(Math.abs(v - vAvg) * 1e6) / 1000; // mV, rounded to 1 µV
       let cls = "ok";
       if (devMv > 10) cls = "bad";
       else if (devMv > 5) cls = "warn";
@@ -505,15 +524,19 @@ class BatteryPackCard extends HTMLElement {
     return out;
   }
 
-  _tempTile(label, val, entityId) {
-    const color = val < 5  ? "var(--clr-blue)"
+  _tempTile(label, entityId) {
+    // Entity exists but is unavailable/unknown → show a dash, not 0°.
+    const raw = parseFloat(this._state(entityId));
+    const val = Number.isFinite(raw) ? raw : null;
+    const color = val === null ? "inherit"
+                : val < 5  ? "var(--clr-blue)"
                 : val < 35 ? "var(--clr-green)"
                 : val < 50 ? "var(--clr-amber)"
                 :            "var(--clr-red)";
     return `
       <div class="temp" ${this._dataE(entityId)} role="button">
         <div class="temp-label">${this._esc(label)}</div>
-        <div class="temp-val" style="color:${color};">${fmt(val, 1)}°</div>
+        <div class="temp-val" style="color:${color};">${val === null ? "—" : fmt(val, 1) + "°"}</div>
       </div>
     `;
   }
@@ -566,8 +589,18 @@ class BatteryPackCard extends HTMLElement {
 
       .cells {
         display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(var(--cell-min-w, 60px), 1fr));
-        gap: 5px;
+        /* Never more than --cell-max-cols per row (so 8/16/24-cell packs keep
+           their familiar rows on wide cards); wrap to fewer columns when a
+           column would drop below --cell-min-w. The 0.1px keeps the
+           max-column case from rounding down to one column fewer. */
+        --cell-gap: 5px;
+        grid-template-columns: repeat(
+          auto-fit,
+          minmax(
+            max(var(--cell-min-w, 48px),
+                calc((100% - (var(--cell-max-cols, 8) - 1) * var(--cell-gap)) / var(--cell-max-cols, 8) - 0.1px)),
+            1fr));
+        gap: var(--cell-gap);
       }
       .cell  {
         position: relative; padding: 8px 4px 6px; text-align: center;
@@ -595,7 +628,7 @@ class BatteryPackCard extends HTMLElement {
       .cell-summary span { padding: 2px 6px; border-radius: 4px; }
       .cell-summary span:hover { background: rgba(255,255,255,0.04); }
 
-      .temps { display: grid; grid-template-columns: repeat(5, 1fr); gap: 5px; }
+      .temps { display: grid; grid-template-columns: repeat(auto-fit, minmax(0, 1fr)); gap: 5px; }
       .temp  { padding: 8px 6px; background: rgba(255,255,255,0.03); border-radius: 7px; text-align: center; }
       .temp:hover { background: rgba(255,255,255,0.07); }
       .temp-label { font-size: 10px; opacity: 0.6; letter-spacing: 0.5px; }
