@@ -15,7 +15,7 @@
  * Click any element to open the matching entity's more-info dialog.
  */
 
-const VERSION = "1.3.3";
+const VERSION = "1.3.4";
 
 const DEFAULTS = {
   name: "",
@@ -290,6 +290,27 @@ const deltaBands = (cfg) => {
   return { warn, bad };
 };
 
+// Bring `el`'s children in line with `next`'s, reusing nodes wherever the tag
+// matches. Swapping the whole tree (innerHTML) destroys the tile under the
+// cursor; its replacement only picks up :hover on the browser's next hit-test,
+// so every render flashed the hovered tile for a frame (issue #9).
+const patchChildren = (el, next) => {
+  const have = [...el.childNodes], want = [...next.childNodes];
+  want.forEach((w, i) => {
+    const h = have[i];
+    if (!h) return el.appendChild(w);
+    if (h.nodeType !== w.nodeType || h.nodeName !== w.nodeName) return el.replaceChild(w, h);
+    if (h.nodeType !== 1) {
+      if (h.nodeValue !== w.nodeValue) h.nodeValue = w.nodeValue;
+      return;
+    }
+    for (const { name } of [...h.attributes]) if (!w.hasAttribute(name)) h.removeAttribute(name);
+    for (const { name, value } of [...w.attributes]) if (h.getAttribute(name) !== value) h.setAttribute(name, value);
+    patchChildren(h, w);
+  });
+  for (let i = want.length; i < have.length; i++) have[i].remove();
+};
+
 // ─── Main card ─────────────────────────────────────────────────────────────
 class BatteryPackCard extends HTMLElement {
   static getStubConfig() {
@@ -337,8 +358,6 @@ class BatteryPackCard extends HTMLElement {
   set hass(hass) {
     this._hass = hass;
     // Coalesce bursts of state-changed events into one render per frame.
-    // Without this, every BMS entity update triggers a full innerHTML replace
-    // — when paired with CSS hover transitions, that creates a visible flicker.
     if (this._rafPending) return;
     this._rafPending = true;
     requestAnimationFrame(() => {
@@ -521,7 +540,7 @@ class BatteryPackCard extends HTMLElement {
     if (curA < -0.1) { powerDir = "discharging"; powerColor = "var(--clr-orange)"; }
     const socColor = soc > 50 ? "var(--clr-green)" : soc > 20 ? "var(--clr-orange)" : "var(--clr-red)";
 
-    this._root.innerHTML = `
+    const html = `
       <div class="header">
         <div class="title">${this._esc(cfg.name)}</div>
         <div class="alarm ${alarmActive ? "alert" : "ok"}" ${this._dataE(E.alarmB)} role="button">
@@ -570,6 +589,13 @@ class BatteryPackCard extends HTMLElement {
 
       <div class="footer" ${this._dataE(E.runtime)}>Runtime ${this._esc(runtime)}</div>
     `;
+    // HA hands every card a new `hass` on any state change in the whole
+    // instance, so most renders produce identical output — leave the DOM alone.
+    if (html === this._html) return;
+    this._html = html;
+    const next = document.createElement("div");
+    next.innerHTML = html;
+    patchChildren(this._root, next);
   }
 
   _dataE(eid) { return eid ? `data-entity="${eid}"` : ""; }
@@ -577,7 +603,10 @@ class BatteryPackCard extends HTMLElement {
   _renderBattery(soc, color, capRem, capTot, soh, entityId) {
     const fillH = (Math.max(0, Math.min(100, soc)) / 100) * 210;
     const fillY = 235 - fillH;
-    const gid = `g_${this._config.prefix || "x"}_${Math.random().toString(36).slice(2, 6)}`;
+    // Unique per card so two packs on one dashboard don't share a gradient, but
+    // stable across renders so unchanged state produces unchanged markup.
+    this._gid = this._gid || `g_${Math.random().toString(36).slice(2, 8)}`;
+    const gid = this._gid;
     return `
       <svg class="battery" viewBox="0 0 130 260" preserveAspectRatio="xMidYMid meet" ${this._dataE(entityId)} aria-hidden="true">
         <defs>
