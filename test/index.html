@@ -58,12 +58,27 @@
   <div class="panel">
     <h2>Test Harness</h2>
 
-    <label for="vfrom">Cell voltage source</label>
+    <label for="vfrom">Entity data unit (what the BMS reports)</label>
     <select id="vfrom">
       <option value="V" selected>V (volts)</option>
       <option value="mV">mV (millivolts)</option>
     </select>
-    <div class="hint">Switch to mV to reproduce the Gobel overflow bug — entities report e.g. 3250 instead of 3.250.</div>
+    <div class="hint">mV = entities report e.g. 3250 instead of 3.250 (Gobel, JK via MQTT).</div>
+
+    <label for="cfgunit">Card's configured unit</label>
+    <select id="cfgunit">
+      <option value="" selected>Match the data</option>
+      <option value="V">V (volts)</option>
+      <option value="mV">mV (millivolts)</option>
+    </select>
+    <div class="hint">Set this against the data unit to reproduce issue #5: data in mV, card told V. The card should detect the real unit and still colour correctly.</div>
+
+    <label for="avg">Pack-average entity</label>
+    <select id="avg">
+      <option value="1" selected>Present</option>
+      <option value="0">Missing</option>
+    </select>
+    <div class="hint">Missing = the card should fall back to the mean of the cells rather than painting every cell red.</div>
 
     <label for="cells">Cells</label>
     <input type="number" id="cells" min="4" max="32" value="16">
@@ -87,6 +102,14 @@
     <label for="width">Card width (test responsive)</label>
     <input type="range" id="width" min="280" max="900" value="600">
     <div class="hint" id="width-val">600 px</div>
+
+    <label for="dsoft">Colour thresholds — yellow / orange / red (mV)</label>
+    <div style="display:flex;gap:6px">
+      <input type="number" id="dsoft" min="0" step="0.5" value="2">
+      <input type="number" id="dwarn" min="0" step="0.5" value="5">
+      <input type="number" id="dbad"  min="0" step="0.5" value="10">
+    </div>
+    <div class="hint">Deviation from the pack average at which a cell turns yellow, orange and red. Blank or invalid falls back to 2 / 5 / 10.</div>
 
     <label for="bad">Inject deviation on cell #7</label>
     <select id="bad">
@@ -161,7 +184,7 @@
 
       set("sensor.test_v_min",   ((baseV + minDelta) * scale).toFixed(dp), opts.vfrom);
       set("sensor.test_v_max",   ((baseV + maxDelta) * scale).toFixed(dp), opts.vfrom);
-      set("sensor.test_v_avg",   (baseV * scale).toFixed(dp), opts.vfrom);
+      if (opts.avg) set("sensor.test_v_avg", (baseV * scale).toFixed(dp), opts.vfrom);
       set("sensor.test_v_delta", ((maxDelta - minDelta) * scale).toFixed(dp), opts.vfrom);
       set("sensor.test_min_cell", String(minIdx));
       set("sensor.test_max_cell", String(maxIdx));
@@ -188,10 +211,13 @@
       return {
         name: "Test Pack",
         cells: opts.cells,
-        cell_voltage_from: opts.vfrom,
+        cell_voltage_from: opts.cfgunit || opts.vfrom,
         cell_voltage_decimals: opts.vdec,
         cell_resistance_decimals: opts.rdec,
         cells_min_width: opts.minw,
+        cell_dev_soft: opts.dsoft,
+        cell_dev_warn: opts.dwarn,
+        cell_dev_bad:  opts.dbad,
         cell_voltage_pattern:    `sensor.test_cell_voltage_${placeholder}`,
         cell_resistance_pattern: `sensor.test_cell_resistance_${placeholder}`,
         entity_soc: "sensor.test_soc",
@@ -229,6 +255,7 @@
     const URL_MAP = {
       from: "vfrom", cells: "cells", vdec: "vdec", rdec: "rdec",
       minw: "minw", pad: "pad", width: "width", bad: "bad", alarm: "alarm",
+      dsoft: "dsoft", dwarn: "dwarn", dbad: "dbad", cfgunit: "cfgunit", avg: "avg",
     };
 
     function applyUrlParams() {
@@ -242,12 +269,17 @@
     function readOpts() {
       return {
         vfrom: $("vfrom").value,
+        cfgunit: $("cfgunit").value,
+        avg:   parseInt($("avg").value, 10),
         cells: parseInt($("cells").value, 10),
         vdec:  parseInt($("vdec").value, 10),
         rdec:  parseInt($("rdec").value, 10),
         minw:  parseInt($("minw").value, 10),
         pad:   $("pad").value,
         width: parseInt($("width").value, 10),
+        dsoft: $("dsoft").value,
+        dwarn: $("dwarn").value,
+        dbad:  $("dbad").value,
         bad:   parseInt($("bad").value, 10),
         alarm: parseInt($("alarm").value, 10),
       };
@@ -289,6 +321,7 @@
     const HARNESS_DEFAULTS = {
       vfrom: "V", cells: 16, vdec: 3, rdec: 0, minw: 48,
       pad: "nn", width: 600, bad: "0", alarm: "0",
+      dsoft: 2, dwarn: 5, dbad: 10, cfgunit: "", avg: "1",
     };
 
     function init() {

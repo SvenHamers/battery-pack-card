@@ -153,22 +153,47 @@ entity_cell_5_volt: sensor.special_probe_for_cell_5           # one-off override
 
 ### Display
 
-The card stores voltages internally in V and resistances in Ω. If your BMS exposes the cell entities in different units (e.g. millivolts), set the source unit so the card normalizes before formatting — otherwise numbers will be 1000× too big and overflow the cell tiles.
+The card stores voltages internally in V and resistances in Ω. **Voltage units are detected automatically:** a lithium cell sits between roughly 1.5 V and 5 V, so a reading like `3331` can only be millivolts and `3.331` can only be volts. If the configured unit disagrees with the readings, the card uses the readings, ignores `cell_voltage_decimals` until the setting is fixed (decimals tuned against mis-scaled numbers would turn `3.331` into `3`), and logs a note in the browser console. The unit settings still apply until the first reading arrives, and set to match they silence the console note. Resistance units are not detected — set `cell_resistance_from` if your BMS reports mΩ.
 
 | Key                          | Default | Description                                                  |
 | ---------------------------- | ------- | ------------------------------------------------------------ |
-| `cell_voltage_from`          | `V`     | Source unit for the per-cell voltage entities: `V` or `mV`.  |
-| `summary_voltage_from`       | *(same as cells)* | Source unit for the min / avg / max / Δ entities, if your BMS reports those in a different unit than the cells. |
+| `cell_voltage_from`          | `V`     | Source unit for the per-cell voltage entities: `V` or `mV`. Overridden when the readings clearly say otherwise (see above). |
+| `summary_voltage_from`       | *(same as cells)* | Source unit for the min / avg / max / Δ entities, if your BMS reports those in a different unit than the cells. Detected from min / avg / max; Δ follows them. |
 | `cell_voltage_decimals`      | `3`     | Decimals shown for cell and summary voltages.                |
 | `cell_resistance_from`       | `ohm`   | Source unit for cell resistances: `ohm` or `mohm`.           |
 | `cell_resistance_decimals`   | `0`     | Decimals shown for the mΩ readout under each cell.           |
 | `cells_max_columns`          | `8`     | Maximum cell tiles per row. 8 and 16-cell packs render as 1 or 2 full rows on any card wide enough. |
 | `cells_min_width`            | `48`    | Minimum cell-tile width in px. When the card is too narrow for `cells_max_columns` tiles of this width, the grid wraps to fewer columns. |
 
+### Cell colouring thresholds
+
+How much spread is "normal" depends on the pack — a well-matched LiFePO₄ bank sits inside a couple of mV, while an older or larger bank may drift 10–20 mV and still be healthy. All five thresholds are in **mV** and live under *Advanced → Cell colouring* in the editor.
+
+| Key              | Default | Description                                                         |
+| ---------------- | ------- | ------------------------------------------------------------------- |
+| `cell_dev_soft`  | `2`     | A cell more than this far from the pack average turns **yellow**.   |
+| `cell_dev_warn`  | `5`     | … turns **orange**.                                                  |
+| `cell_dev_bad`   | `10`    | … turns **red**.                                                     |
+| `delta_warn`     | `5`     | Pack Δ (max − min) at or above this shows **amber** in the summary line. |
+| `delta_bad`      | `15`    | Pack Δ at or above this shows **red**.                                |
+
+Values may be fractional (`2.5`). They are sorted before use, so a mis-ordered config still produces usable bands, and any blank or invalid entry falls back to its default.
+
+```yaml
+# A bank that normally drifts ~10 mV: don't paint the whole card red.
+cell_dev_soft: 5
+cell_dev_warn: 10
+cell_dev_bad: 20
+delta_warn: 20
+delta_bad: 40
+```
+
+> The cell tint is measured against the **pack average entity**. If that entity is missing or unavailable, the card uses the mean of the cell readings instead.
+
 ## Conventions
 
 - **Charge / discharge direction:** derived from the **current** sensor, not power. Many BMS integrations report power as an unsigned magnitude, so the card uses current's sign: positive current = charging (energy into the battery), negative = discharging. Make sure `entity_current` points at a signed sensor.
-- **Cell colouring:** cells are tinted by their offset from the pack's average voltage — green ≤ 2 mV, yellow ≤ 5, orange ≤ 10, red beyond. The lowest and highest cells get a red and green halo respectively.
+- **Cell colouring:** cells are tinted by their offset from the pack's average voltage — by default green ≤ 2 mV, yellow ≤ 5, orange ≤ 10, red beyond. The bands are configurable, see [Cell colouring thresholds](#cell-colouring-thresholds). The lowest and highest cells get a red and green halo respectively.
 - **Click-to-detail:** every visible element (battery, stat tile, pill, individual cell, temperature tile, alarm badge) opens HA's standard entity-detail dialog.
 - **Read-only:** the card never writes to the BMS. All `number.*` and `switch.*` settings entities are deliberately ignored.
 

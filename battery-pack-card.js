@@ -15,7 +15,7 @@
  * Click any element to open the matching entity's more-info dialog.
  */
 
-const VERSION = "1.3.2";
+const VERSION = "1.3.3";
 
 const DEFAULTS = {
   name: "",
@@ -35,6 +35,14 @@ const DEFAULTS = {
   cell_resistance_decimals: 0,
   cells_min_width: 48,
   cells_max_columns: 8,
+  // Cell tint bands, in mV of deviation from the pack average. Packs differ in
+  // how much spread is normal, so these are configurable rather than fixed.
+  cell_dev_soft: 2,
+  cell_dev_warn: 5,
+  cell_dev_bad: 10,
+  // Summary Δ (max − min) bands, in mV.
+  delta_warn: 5,
+  delta_bad: 15,
 };
 
 const BASIC_SCHEMA = [
@@ -58,6 +66,8 @@ const BASIC_SCHEMA = [
 
 const ENT_SENSOR = { entity: { domain: "sensor" } };
 const ENT_BIN    = { entity: { domain: "binary_sensor" } };
+// Threshold fields are all "a number of millivolts", so they share one selector.
+const MV_BAND    = { number: { min: 0, max: 500, step: 0.5, mode: "box" } };
 
 const ADVANCED_SECTIONS = [
   {
@@ -152,6 +162,22 @@ const ADVANCED_SECTIONS = [
       },
     ],
   },
+  {
+    title: "Cell colouring (mV of deviation from the pack average)",
+    schema: [
+      {
+        type: "grid",
+        name: "",
+        schema: [
+          { name: "cell_dev_soft", selector: MV_BAND },
+          { name: "cell_dev_warn", selector: MV_BAND },
+          { name: "cell_dev_bad",  selector: MV_BAND },
+          { name: "delta_warn",    selector: MV_BAND },
+          { name: "delta_bad",     selector: MV_BAND },
+        ],
+      },
+    ],
+  },
 ];
 
 const LABELS = {
@@ -203,6 +229,11 @@ const LABELS = {
   cell_resistance_decimals: "Cell resistance decimals (mΩ)",
   cells_min_width: "Cell tile min width (px)",
   cells_max_columns: "Cell grid max columns",
+  cell_dev_soft: "Yellow above (mV)",
+  cell_dev_warn: "Orange above (mV)",
+  cell_dev_bad: "Red above (mV)",
+  delta_warn: "Summary Δ amber at (mV)",
+  delta_bad: "Summary Δ red at (mV)",
 };
 
 const fmt = (n, d = 0) => {
@@ -218,6 +249,12 @@ const pick   = (override, fallback) => orNull(override) || fallback || null;
 
 // Source-unit → volts scale factor. Accepts "V" / "mV" (case-insensitive).
 const voltScale = (s) => (String(s || "V").toLowerCase() === "mv" ? 0.001 : 1);
+// A lithium cell sits between roughly 1.5 V and 5 V, so a reading in the
+// thousands can only be millivolts — the two ranges never overlap. That makes
+// the unit recoverable from the readings themselves, which matters because
+// `cell_voltage_from` is easy to leave wrong: the *display* can be patched with
+// `cell_voltage_decimals` while the cell tint stays 1000× off (issues #5, #8).
+const MV_CUTOFF = 100;
 // Source-unit → ohms scale factor. Accepts "ohm" / "mohm" / "Ω" / "mΩ".
 const ohmScale = (s) => {
   const k = String(s || "ohm").toLowerCase();
@@ -226,6 +263,31 @@ const ohmScale = (s) => {
 const intOr = (v, d) => {
   const n = parseInt(v, 10);
   return Number.isFinite(n) && n >= 0 ? n : d;
+};
+const numOr = (v, d) => {
+  const n = parseFloat(v);
+  return Number.isFinite(n) && n >= 0 ? n : d;
+};
+
+// Cell tint bands in mV from the pack average. Sorted ascending so a
+// mis-ordered config (red below yellow) still yields usable bands instead of
+// a tint that never fires.
+const devBands = (cfg) => {
+  const [soft, warn, bad] = [
+    numOr(cfg.cell_dev_soft, DEFAULTS.cell_dev_soft),
+    numOr(cfg.cell_dev_warn, DEFAULTS.cell_dev_warn),
+    numOr(cfg.cell_dev_bad,  DEFAULTS.cell_dev_bad),
+  ].sort((a, b) => a - b);
+  return { soft, warn, bad };
+};
+
+// Summary Δ bands, same ordering guarantee.
+const deltaBands = (cfg) => {
+  const [warn, bad] = [
+    numOr(cfg.delta_warn, DEFAULTS.delta_warn),
+    numOr(cfg.delta_bad,  DEFAULTS.delta_bad),
+  ].sort((a, b) => a - b);
+  return { warn, bad };
 };
 
 // ─── Main card ─────────────────────────────────────────────────────────────
@@ -300,6 +362,32 @@ class BatteryPackCard extends HTMLElement {
   _exists(eid){ return !!(eid && this._hass?.states[eid]); }
   _num(eid)   { const v = parseFloat(this._state(eid)); return Number.isFinite(v) ? v : 0; }
   _on(eid)    { return this._state(eid) === "on"; }
+  _raw(eid)   { return parseFloat(this._state(eid)); }
+
+  // Effective V scale for a group of readings. The data wins over the
+  // configured unit: for cell voltages the magnitude is unambiguous (see
+  // MV_CUTOFF), and a wrong unit silently breaks the colouring rather than
+  // just the formatting. Config is the fallback when nothing readable is in.
+  _voltScaleFor(raws, configured, what) {
+    const sample = raws.find((v) => Number.isFinite(v) && v > 0);
+    if (sample === undefined) return configured;
+    const detected = sample >= MV_CUTOFF ? 0.001 : 1;
+    if (detected !== configured) this._noteUnit(what, detected);
+    return detected;
+  }
+
+  // Tell the user once per session, so a mis-set unit is diagnosable from the
+  // browser console instead of looking like a colouring bug.
+  _noteUnit(what, scale) {
+    this._unitNotes = this._unitNotes || new Set();
+    const key = `${what}:${scale}`;
+    if (this._unitNotes.has(key)) return;
+    this._unitNotes.add(key);
+    console.info(
+      `%c BATTERY-PACK-CARD %c ${what} read like ${scale === 0.001 ? "mV" : "V"}; using that instead of the configured unit. Set the matching source unit in the card editor to silence this.`,
+      "color:#fff;background:#3949ab;border-radius:3px", "color:inherit",
+    );
+  }
 
   _resolveEntities() {
     const c = this._config;
@@ -374,14 +462,35 @@ class BatteryPackCard extends HTMLElement {
     const capRem= this._num(E.capRem);
     const capTot= this._num(E.capTot);
     const runtime= this._state(E.runtime) || "";
-    const vSc   = voltScale(cfg.cell_voltage_from);
+    // Voltage units are read off the data (see MV_CUTOFF); the configured
+    // units only apply until a reading is available.
+    const cellRaw = [];
+    for (let n = 1; n <= cfg.cells; n++) cellRaw.push(this._raw(this._cellEntity("v", n)));
+    const vScCfg= voltScale(cfg.cell_voltage_from);
+    const vSc   = this._voltScaleFor(cellRaw, vScCfg, "Cell voltages");
     // Summary (min/avg/max/Δ) entities may come in a different unit than the
-    // per-cell entities; fall back to the cell unit when not set.
-    const sSc   = voltScale(orNull(cfg.summary_voltage_from) || cfg.cell_voltage_from);
+    // per-cell entities; fall back to the cell unit when not set. Δ has no
+    // unambiguous magnitude of its own, so it follows min/avg/max.
+    const sScCfg= voltScale(orNull(cfg.summary_voltage_from) || cfg.cell_voltage_from);
+    const sSc   = this._voltScaleFor(
+      [E.vMin, E.vAvg, E.vMax].map((e) => this._raw(e)), sScCfg, "Min/avg/max voltages",
+    );
     const rSc   = ohmScale(cfg.cell_resistance_from);
-    const vDec  = intOr(cfg.cell_voltage_decimals, 3);
+    const dev   = devBands(cfg);
+    const dBand = deltaBands(cfg);
+    // Decimals chosen while the unit was wrong were tuned to mis-scaled numbers
+    // (0 makes "3,331.000" read "3,331") and would now turn 3.331 V into "3";
+    // they apply again once the unit is set to match.
+    const unitOk= vSc === vScCfg && sSc === sScCfg;
+    const vDec  = unitOk ? intOr(cfg.cell_voltage_decimals, 3) : 3;
     const rDec  = intOr(cfg.cell_resistance_decimals, 0);
-    const vAvg  = this._num(E.vAvg)  * sSc;
+    // Without a pack-average entity the tint would measure every cell against
+    // 0 V and paint the whole grid red; the mean of the cells is what the BMS
+    // would have reported anyway.
+    const cellV = cellRaw.filter((v) => Number.isFinite(v) && v > 0).map((v) => v * vSc);
+    const vAvgE = this._num(E.vAvg) * sSc;
+    const vAvg  = vAvgE > 0 ? vAvgE
+                : cellV.length ? cellV.reduce((a, b) => a + b, 0) / cellV.length : 0;
     const vMin  = this._num(E.vMin)  * sSc;
     const vMax  = this._num(E.vMax)  * sSc;
     const vDelta= this._num(E.vDelta) * sSc;
@@ -444,15 +553,15 @@ class BatteryPackCard extends HTMLElement {
       </div>` : ""}
 
       ${cfg.show_cells ? `
-        <div class="section-label">CELLS — voltage and resistance, colour = mV from pack avg</div>
-        <div class="cells" style="--cell-min-w:${intOr(cfg.cells_min_width, 48)}px;--cell-max-cols:${Math.max(1, intOr(cfg.cells_max_columns, 8))}">${this._renderCells(cfg.cells, vAvg, minCell, maxCell, vSc, vDec, rSc, rDec)}</div>` : ""}
+        <div class="section-label">CELLS — voltage and resistance, colour = mV from pack avg (${dev.soft}/${dev.warn}/${dev.bad})</div>
+        <div class="cells" style="--cell-min-w:${intOr(cfg.cells_min_width, 48)}px;--cell-max-cols:${Math.max(1, intOr(cfg.cells_max_columns, 8))}">${this._renderCells(cfg.cells, vAvg, minCell, maxCell, vSc, vDec, rSc, rDec, dev)}</div>` : ""}
 
       ${cfg.show_summary ? `
         <div class="cell-summary">
           <span ${this._dataE(E.vMin)}><b style="color:var(--clr-red)">${fmt(vMin, vDec)}</b> V <span class="muted">min #${minCell}</span></span>
           <span ${this._dataE(E.vAvg)}><b>${fmt(vAvg, vDec)}</b> V <span class="muted">avg</span></span>
           <span ${this._dataE(E.vMax)}><b style="color:var(--clr-green)">${fmt(vMax, vDec)}</b> V <span class="muted">max #${maxCell}</span></span>
-          <span ${this._dataE(E.vDelta)}><b style="color:${vDelta * 1000 < 5 ? "var(--clr-green)" : vDelta * 1000 < 15 ? "var(--clr-amber)" : "var(--clr-red)"}">${fmt(vDelta * 1000, 0)}</b> mV <span class="muted">Δ</span></span>
+          <span ${this._dataE(E.vDelta)}><b style="color:${vDelta * 1000 < dBand.warn ? "var(--clr-green)" : vDelta * 1000 < dBand.bad ? "var(--clr-amber)" : "var(--clr-red)"}">${fmt(vDelta * 1000, 0)}</b> mV <span class="muted">Δ</span></span>
         </div>` : ""}
 
       ${cfg.show_temperatures && tempTiles ? `
@@ -500,7 +609,7 @@ class BatteryPackCard extends HTMLElement {
     return `<span class="pill pill-${status}" ${this._dataE(entityId)} role="button">${this._esc(label)} <b>${this._esc(value)}</b></span>`;
   }
 
-  _renderCells(N, vAvg, minCell, maxCell, vSc, vDec, rSc, rDec) {
+  _renderCells(N, vAvg, minCell, maxCell, vSc, vDec, rSc, rDec, dev) {
     let out = "";
     for (let n = 1; n <= N; n++) {
       const ev = this._cellEntity("v", n);
@@ -509,9 +618,9 @@ class BatteryPackCard extends HTMLElement {
       const r = this._num(er) * rSc;       // → ohms
       const devMv = Math.round(Math.abs(v - vAvg) * 1e6) / 1000; // mV, rounded to 1 µV
       let cls = "ok";
-      if (devMv > 10) cls = "bad";
-      else if (devMv > 5) cls = "warn";
-      else if (devMv > 2) cls = "soft";
+      if (devMv > dev.bad) cls = "bad";
+      else if (devMv > dev.warn) cls = "warn";
+      else if (devMv > dev.soft) cls = "soft";
       const tag = n === maxCell ? "max" : n === minCell ? "min" : "";
       out += `
         <div class="cell ${cls} ${tag}" ${this._dataE(ev)} role="button">
