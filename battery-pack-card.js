@@ -15,7 +15,7 @@
  * Click any element to open the matching entity's more-info dialog.
  */
 
-const VERSION = "1.3.4";
+const VERSION = "1.3.5";
 
 const DEFAULTS = {
   name: "",
@@ -603,6 +603,7 @@ class BatteryPackCard extends HTMLElement {
   _renderBattery(soc, color, capRem, capTot, soh, entityId) {
     const fillH = (Math.max(0, Math.min(100, soc)) / 100) * 210;
     const fillY = 235 - fillH;
+    const fillW = (Math.max(0, Math.min(100, soc)) / 100) * 270;   // horizontal variant
     // Unique per card so two packs on one dashboard don't share a gradient, but
     // stable across renders so unchanged state produces unchanged markup.
     this._gid = this._gid || `g_${Math.random().toString(36).slice(2, 8)}`;
@@ -622,6 +623,20 @@ class BatteryPackCard extends HTMLElement {
         <text x="65" y="155" text-anchor="middle" fill="rgba(255,255,255,0.85)" font-size="11">${fmt(capRem, 1)} / ${fmt(capTot, 0)} Ah</text>
         <text x="65" y="172" text-anchor="middle" fill="rgba(255,255,255,0.65)" font-size="11">SOH ${Math.round(soh)}%</text>
       </svg>
+      <svg class="battery-h" viewBox="0 0 300 76" preserveAspectRatio="xMidYMid meet" ${this._dataE(entityId)} aria-hidden="true">
+        <defs>
+          <linearGradient id="${gid}_h" x1="0" x2="0" y1="0" y2="1">
+            <stop offset="0" stop-color="${color}" stop-opacity="1"/>
+            <stop offset="1" stop-color="${color}" stop-opacity="0.55"/>
+          </linearGradient>
+        </defs>
+        <rect x="2" y="2" width="282" height="72" rx="10" style="fill:rgba(255,255,255,0.04);stroke:var(--primary-text-color,#fff);stroke-opacity:0.3" stroke-width="2.5"/>
+        <rect x="287" y="24" width="11" height="28" rx="3" style="fill:var(--primary-text-color,#fff);fill-opacity:0.35"/>
+        <rect x="8" y="8" width="${fillW}" height="60" rx="5" fill="url(#${gid}_h)"/>
+        <text x="20" y="49" style="fill:var(--primary-text-color,#fff)" font-size="30" font-weight="700">${Math.round(soc)}%</text>
+        <text x="272" y="33" text-anchor="end" style="fill:var(--primary-text-color,#fff);fill-opacity:0.85" font-size="12">${fmt(capRem, 1)} / ${fmt(capTot, 0)} Ah</text>
+        <text x="272" y="51" text-anchor="end" style="fill:var(--primary-text-color,#fff);fill-opacity:0.65" font-size="12">SOH ${Math.round(soh)}%</text>
+      </svg>
     `;
   }
 
@@ -629,7 +644,7 @@ class BatteryPackCard extends HTMLElement {
     return `
       <div class="stat" style="border-left-color:${color};" ${this._dataE(entityId)} role="button">
         <div class="stat-label">${label}${sub ? ` · <span class="muted">${this._esc(sub)}</span>` : ""}</div>
-        <div class="stat-value">${this._esc(value)}</div>
+        <div class="stat-value" title="${this._esc(value)}">${this._esc(value)}</div>
       </div>
     `;
   }
@@ -695,7 +710,9 @@ class BatteryPackCard extends HTMLElement {
         --clr-purple: #ab47bc; --clr-grey:   #9e9e9e;
       }
       ha-card { display: block; padding: 18px 18px 14px; }
-      #body { display: flex; flex-direction: column; gap: 12px; }
+      /* Layout follows the card's own width, not the viewport: in a horizontal
+         stack a wide screen can still give each card a narrow column. */
+      #body { display: flex; flex-direction: column; gap: 12px; container-type: inline-size; }
       [data-entity] { cursor: pointer; }
       [data-entity]:focus-visible { outline: 2px solid var(--clr-blue); outline-offset: 2px; }
 
@@ -713,6 +730,22 @@ class BatteryPackCard extends HTMLElement {
       .stat:hover { background: rgba(255,255,255,0.07); }
       .stat-label { font-size: 10px; letter-spacing: 1.2px; opacity: 0.7; }
       .stat-value { font-size: 18px; font-weight: 600; margin-top: 2px; font-variant-numeric: tabular-nums; }
+      /* Tiles may shrink below their text rather than push past the card edge
+         (issue #6). Labels wrap as before; a value that still doesn't fit is
+         cut with an ellipsis instead of breaking over two lines. */
+      .stats, .stat { min-width: 0; }
+      .stat-label { overflow-wrap: anywhere; }
+      .stat-value { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+      .battery-h { display: none; }
+      /* Too narrow for battery + two stat columns side by side (130 + 16 + two
+         tiles wide enough for values like "-150.2 A"): lay the battery down as a
+         full-width bar above the stats. Same height either way (~250px). */
+      @container (max-width: 380px) {
+        .hero { flex-direction: column; gap: 10px; }
+        .battery { display: none; }
+        .battery-h { display: block; width: 100%; height: auto; filter: drop-shadow(0 3px 8px rgba(0,0,0,0.2)); }
+      }
 
       .pills { display:flex; flex-wrap:wrap; gap: 6px; }
       .pill  { padding: 5px 11px; border-radius: 14px; font-size: 12px; font-weight: 500; letter-spacing: 0.2px; }
