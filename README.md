@@ -179,6 +179,10 @@ How much spread is "normal" depends on the pack — a well-matched LiFePO₄ ban
 
 Values may be fractional (`2.5`). They are sorted before use, so a mis-ordered config still produces usable bands, and any blank or invalid entry falls back to its default.
 
+| Key            | Default | Description |
+| -------------- | ------- | ----------- |
+| `max_cell_red` | `false` | Swap the min / max highlight: the **highest** cell gets the red halo and red summary value, the lowest the green one. Useful when you mostly watch for the top cell running into overvoltage while charging (e.g. above 3.65 V on LiFePO₄). |
+
 ```yaml
 # A bank that normally drifts ~10 mV: don't paint the whole card red.
 cell_dev_soft: 5
@@ -193,7 +197,7 @@ delta_bad: 40
 ## Conventions
 
 - **Charge / discharge direction:** derived from the **current** sensor, not power. Many BMS integrations report power as an unsigned magnitude, so the card uses current's sign: positive current = charging (energy into the battery), negative = discharging. Make sure `entity_current` points at a signed sensor.
-- **Cell colouring:** cells are tinted by their offset from the pack's average voltage — by default green ≤ 2 mV, yellow ≤ 5, orange ≤ 10, red beyond. The bands are configurable, see [Cell colouring thresholds](#cell-colouring-thresholds). The lowest and highest cells get a red and green halo respectively.
+- **Cell colouring:** cells are tinted by their offset from the pack's average voltage — by default green ≤ 2 mV, yellow ≤ 5, orange ≤ 10, red beyond. The bands are configurable, see [Cell colouring thresholds](#cell-colouring-thresholds). The lowest and highest cells get a red and green halo respectively (reversed with `max_cell_red: true`).
 - **Click-to-detail:** every visible element (battery, stat tile, pill, individual cell, temperature tile, alarm badge) opens HA's standard entity-detail dialog.
 - **Read-only:** the card never writes to the BMS. All `number.*` and `switch.*` settings entities are deliberately ignored.
 

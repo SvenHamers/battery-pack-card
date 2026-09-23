@@ -15,7 +15,7 @@
  * Click any element to open the matching entity's more-info dialog.
  */
 
-const VERSION = "1.3.5";
+const VERSION = "1.3.6";
 
 const DEFAULTS = {
   name: "",
@@ -43,6 +43,9 @@ const DEFAULTS = {
   // Summary Δ (max − min) bands, in mV.
   delta_warn: 5,
   delta_bad: 15,
+  // Lowest cell red / highest green by default. On: the reverse, for people
+  // who watch for the top cell running into overvoltage while charging.
+  max_cell_red: false,
 };
 
 const BASIC_SCHEMA = [
@@ -176,6 +179,7 @@ const ADVANCED_SECTIONS = [
           { name: "delta_bad",     selector: MV_BAND },
         ],
       },
+      { name: "max_cell_red", selector: { boolean: {} } },
     ],
   },
 ];
@@ -234,6 +238,7 @@ const LABELS = {
   cell_dev_bad: "Red above (mV)",
   delta_warn: "Summary Δ amber at (mV)",
   delta_bad: "Summary Δ red at (mV)",
+  max_cell_red: "Highest cell in red, lowest in green",
 };
 
 const fmt = (n, d = 0) => {
@@ -497,6 +502,9 @@ class BatteryPackCard extends HTMLElement {
     const rSc   = ohmScale(cfg.cell_resistance_from);
     const dev   = devBands(cfg);
     const dBand = deltaBands(cfg);
+    const maxRed = cfg.max_cell_red === true || cfg.max_cell_red === "true";
+    const minClr = maxRed ? "var(--clr-green)" : "var(--clr-red)";
+    const maxClr = maxRed ? "var(--clr-red)"   : "var(--clr-green)";
     // Decimals chosen while the unit was wrong were tuned to mis-scaled numbers
     // (0 makes "3,331.000" read "3,331") and would now turn 3.331 V into "3";
     // they apply again once the unit is set to match.
@@ -573,13 +581,13 @@ class BatteryPackCard extends HTMLElement {
 
       ${cfg.show_cells ? `
         <div class="section-label">CELLS — voltage and resistance, colour = mV from pack avg (${dev.soft}/${dev.warn}/${dev.bad})</div>
-        <div class="cells" style="--cell-min-w:${intOr(cfg.cells_min_width, 48)}px;--cell-max-cols:${Math.max(1, intOr(cfg.cells_max_columns, 8))}">${this._renderCells(cfg.cells, vAvg, minCell, maxCell, vSc, vDec, rSc, rDec, dev)}</div>` : ""}
+        <div class="cells${maxRed ? " max-red" : ""}" style="--cell-min-w:${intOr(cfg.cells_min_width, 48)}px;--cell-max-cols:${Math.max(1, intOr(cfg.cells_max_columns, 8))}">${this._renderCells(cfg.cells, vAvg, minCell, maxCell, vSc, vDec, rSc, rDec, dev)}</div>` : ""}
 
       ${cfg.show_summary ? `
         <div class="cell-summary">
-          <span ${this._dataE(E.vMin)}><b style="color:var(--clr-red)">${fmt(vMin, vDec)}</b> V <span class="muted">min #${minCell}</span></span>
+          <span ${this._dataE(E.vMin)}><b style="color:${minClr}">${fmt(vMin, vDec)}</b> V <span class="muted">min #${minCell}</span></span>
           <span ${this._dataE(E.vAvg)}><b>${fmt(vAvg, vDec)}</b> V <span class="muted">avg</span></span>
-          <span ${this._dataE(E.vMax)}><b style="color:var(--clr-green)">${fmt(vMax, vDec)}</b> V <span class="muted">max #${maxCell}</span></span>
+          <span ${this._dataE(E.vMax)}><b style="color:${maxClr}">${fmt(vMax, vDec)}</b> V <span class="muted">max #${maxCell}</span></span>
           <span ${this._dataE(E.vDelta)}><b style="color:${vDelta * 1000 < dBand.warn ? "var(--clr-green)" : vDelta * 1000 < dBand.bad ? "var(--clr-amber)" : "var(--clr-red)"}">${fmt(vDelta * 1000, 0)}</b> mV <span class="muted">Δ</span></span>
         </div>` : ""}
 
@@ -790,6 +798,8 @@ class BatteryPackCard extends HTMLElement {
       .cell.bad  { background: rgba(239,83,80,0.28); }
       .cell.min  { border: 2px solid var(--clr-red);   box-shadow: 0 0 12px rgba(239,83,80,0.4); }
       .cell.max  { border: 2px solid var(--clr-green); box-shadow: 0 0 12px rgba(76,175,80,0.4); }
+      .max-red .cell.min { border-color: var(--clr-green); box-shadow: 0 0 12px rgba(76,175,80,0.4); }
+      .max-red .cell.max { border-color: var(--clr-red);   box-shadow: 0 0 12px rgba(239,83,80,0.4); }
       .cell-n { font-size: 9px; opacity: 0.55; line-height: 1; }
       .cell-v { font-size: 14px; font-weight: 700; line-height: 1.4; font-variant-numeric: tabular-nums; }
       .cell-r { font-size: 9px; opacity: 0.55; line-height: 1; }

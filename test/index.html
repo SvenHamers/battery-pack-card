@@ -111,6 +111,12 @@
     </div>
     <div class="hint">Deviation from the pack average at which a cell turns yellow, orange and red. Blank or invalid falls back to 2 / 5 / 10.</div>
 
+    <label for="maxred">Highest cell in red</label>
+    <select id="maxred">
+      <option value="0" selected>No (default: lowest red, highest green)</option>
+      <option value="1">Yes (max_cell_red)</option>
+    </select>
+
     <label for="bad">Inject deviation on cell #7</label>
     <select id="bad">
       <option value="0" selected>None</option>
@@ -215,6 +221,7 @@
         cell_voltage_decimals: opts.vdec,
         cell_resistance_decimals: opts.rdec,
         cells_min_width: opts.minw,
+        max_cell_red: opts.maxred,
         cell_dev_soft: opts.dsoft,
         cell_dev_warn: opts.dwarn,
         cell_dev_bad:  opts.dbad,
@@ -255,7 +262,7 @@
     const URL_MAP = {
       from: "vfrom", cells: "cells", vdec: "vdec", rdec: "rdec",
       minw: "minw", pad: "pad", width: "width", bad: "bad", alarm: "alarm",
-      dsoft: "dsoft", dwarn: "dwarn", dbad: "dbad", cfgunit: "cfgunit", avg: "avg",
+      dsoft: "dsoft", dwarn: "dwarn", dbad: "dbad", cfgunit: "cfgunit", avg: "avg", maxred: "maxred",
     };
 
     function applyUrlParams() {
@@ -277,6 +284,7 @@
         minw:  parseInt($("minw").value, 10),
         pad:   $("pad").value,
         width: parseInt($("width").value, 10),
+        maxred: $("maxred").value === "1",
         dsoft: $("dsoft").value,
         dwarn: $("dwarn").value,
         dbad:  $("dbad").value,
@@ -321,7 +329,7 @@
     const HARNESS_DEFAULTS = {
       vfrom: "V", cells: 16, vdec: 3, rdec: 0, minw: 48,
       pad: "nn", width: 600, bad: "0", alarm: "0",
-      dsoft: 2, dwarn: 5, dbad: 10, cfgunit: "", avg: "1",
+      dsoft: 2, dwarn: 5, dbad: 10, cfgunit: "", avg: "1", maxred: "0",
     };
 
     function init() {
