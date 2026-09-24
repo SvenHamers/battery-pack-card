@@ -15,7 +15,7 @@
  * Click any element to open the matching entity's more-info dialog.
  */
 
-const VERSION = "1.3.6";
+const VERSION = "1.3.7-beta.1";
 
 const DEFAULTS = {
   name: "",
@@ -585,10 +585,10 @@ class BatteryPackCard extends HTMLElement {
 
       ${cfg.show_summary ? `
         <div class="cell-summary">
-          <span ${this._dataE(E.vMin)}><b style="color:${minClr}">${fmt(vMin, vDec)}</b> V <span class="muted">min #${minCell}</span></span>
+          <span ${this._dataE(E.vMin)}><b style="color:${minClr}">${fmt(vMin, vDec)}</b> V <span class="muted">min #<span class="n">${minCell}</span></span></span>
           <span ${this._dataE(E.vAvg)}><b>${fmt(vAvg, vDec)}</b> V <span class="muted">avg</span></span>
-          <span ${this._dataE(E.vMax)}><b style="color:${maxClr}">${fmt(vMax, vDec)}</b> V <span class="muted">max #${maxCell}</span></span>
-          <span ${this._dataE(E.vDelta)}><b style="color:${vDelta * 1000 < dBand.warn ? "var(--clr-green)" : vDelta * 1000 < dBand.bad ? "var(--clr-amber)" : "var(--clr-red)"}">${fmt(vDelta * 1000, 0)}</b> mV <span class="muted">Δ</span></span>
+          <span ${this._dataE(E.vMax)}><b style="color:${maxClr}">${fmt(vMax, vDec)}</b> V <span class="muted">max #<span class="n">${maxCell}</span></span></span>
+          <span ${this._dataE(E.vDelta)}><b class="dv" style="color:${vDelta * 1000 < dBand.warn ? "var(--clr-green)" : vDelta * 1000 < dBand.bad ? "var(--clr-amber)" : "var(--clr-red)"}">${fmt(vDelta * 1000, 0)}</b> mV <span class="muted">Δ</span></span>
         </div>` : ""}
 
       ${cfg.show_temperatures && tempTiles ? `
@@ -804,10 +804,28 @@ class BatteryPackCard extends HTMLElement {
       .cell-v { font-size: 14px; font-weight: 700; line-height: 1.4; font-variant-numeric: tabular-nums; }
       .cell-r { font-size: 9px; opacity: 0.55; line-height: 1; }
 
-      .cell-summary { display:flex; justify-content:space-between; flex-wrap:wrap; gap:6px; font-size:12px; padding: 4px 2px 0; }
+      /* A fixed grid, not a wrapping line: whether Δ fitted on the first line
+         used to depend on the values ("min #3" vs "min #10"), so the line
+         count flipped as cells changed and everything below jumped (issue
+         #10). Now the layout depends only on the card width: four columns,
+         or 2×2 when the widest possible values wouldn't fit. */
+      .cell-summary {
+        display: grid; grid-template-columns: repeat(4, auto); justify-content: space-between;
+        gap: 6px; font-size: 12px; padding: 4px 2px 0; font-variant-numeric: tabular-nums;
+      }
+      .cell-summary > span { white-space: nowrap; }
       .cell-summary .muted { opacity: 0.5; margin-left: 3px; }
       .cell-summary span { padding: 2px 6px; border-radius: 4px; }
-      .cell-summary span:hover { background: rgba(255,255,255,0.04); }
+      .cell-summary > span:hover { background: rgba(255,255,255,0.04); }
+      /* Room for two digits either way, so #3 → #10 or 9 → 23 mV moves nothing. */
+      .cell-summary .n  { padding: 0; display: inline-block; min-width: 2ch; }
+      .cell-summary .dv { display: inline-block; min-width: 2ch; text-align: right; }
+      @container (max-width: 456px) {
+        .cell-summary { grid-template-columns: repeat(2, auto); }
+      }
+      @container (max-width: 236px) {
+        .cell-summary { grid-template-columns: auto; justify-content: start; }
+      }
 
       .temps { display: grid; grid-template-columns: repeat(auto-fit, minmax(0, 1fr)); gap: 5px; }
       .temp  { padding: 8px 6px; background: rgba(255,255,255,0.03); border-radius: 7px; text-align: center; }
