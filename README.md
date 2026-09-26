@@ -194,6 +194,23 @@ delta_bad: 40
 
 > The cell tint is measured against the **pack average entity**. If that entity is missing or unavailable, the card uses the mean of the cell readings instead.
 
+### Pack info
+
+Notes that don't come from the BMS (cell model, installation date, terminal torque, breaker size, …) can be kept on the card itself. A **More info** button in the card's footer expands a list of label / value fields; admins get an **Edit** button to add, change, remove and drag-reorder fields. Changes save automatically.
+
+The fields are stored in Home Assistant (the frontend's shared data store, **HA 2025.12 or newer**), not in the dashboard config, so:
+
+- every user and device sees the same info, and edits on one device appear on the others straight away;
+- only admin users can edit (enforced by Home Assistant); everyone else can read;
+- the info survives restarts and is included in HA backups.
+
+Info is kept **per battery pack**: by default it's keyed by the card's `prefix`, else its SOC entity, else its title. Several cards each keep their own info, and two cards showing the same pack share it. On older Home Assistant versions the button is simply not shown.
+
+| Key         | Default | Description |
+| ----------- | ------- | ----------- |
+| `show_info` | `true`  | Show the **More info** button (it only appears when there is info, or for admins). |
+| `info_key`  | *(prefix, SOC entity or title)* | Pin the pack the info belongs to, e.g. after renaming entities. Cards with the same `info_key` share their info. |
+
 ## Conventions
 
 - **Charge / discharge direction:** derived from the **current** sensor, not power. Many BMS integrations report power as an unsigned magnitude, so the card uses current's sign: positive current = charging (energy into the battery), negative = discharging. Make sure `entity_current` points at a signed sensor.

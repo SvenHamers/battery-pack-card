@@ -125,6 +125,14 @@
       <option value="20">+20 mV (bad red)</option>
     </select>
 
+    <label for="infouser">Pack info backend</label>
+    <select id="infouser">
+      <option value="admin" selected>HA 2025.12+, admin user</option>
+      <option value="user">HA 2025.12+, non-admin user</option>
+      <option value="old">HA before 2025.12 (no system data)</option>
+    </select>
+    <div class="hint">Simulates HA's shared frontend store (kept in this browser's localStorage). Open the harness in two tabs to see edits sync live.</div>
+
     <label for="alarm">Alarm active</label>
     <select id="alarm">
       <option value="0" selected>No</option>
@@ -149,6 +157,46 @@
     let card = null;
 
     const pad = (n, padded) => padded ? String(n).padStart(2, "0") : String(n);
+
+    // ── Mock of HA's frontend system-data store (HA 2025.12+) ────────────────
+    // Same contract as core: set is admin-only, get/subscribe for everyone,
+    // subscribers get {value} on subscribe and after every set. Persisted in
+    // localStorage and mirrored across tabs via the storage event.
+    const SYS_KEY = "harness-system-data";
+    const sysLoad = () => { try { return JSON.parse(localStorage.getItem(SYS_KEY)) || {}; } catch (e) { return {}; } };
+    const sysSubs = new Map();   // key -> Set<callback>
+    const sysEmit = (key) => { const v = sysLoad()[key]; (sysSubs.get(key) || []).forEach((cb) => cb({ value: v === undefined ? null : v })); };
+    window.addEventListener("storage", (e) => { if (e.key === SYS_KEY) sysSubs.forEach((_, k) => sysEmit(k)); });
+    const unknown = () => Promise.reject({ code: "unknown_command", message: "Unknown command." });
+    const conns = {};
+    function mockConnection(mode) {
+      if (conns[mode]) return conns[mode];
+      return (conns[mode] = {
+        subscribeMessage(cb, msg) {
+          if (mode === "old" || msg.type !== "frontend/subscribe_system_data") return unknown();
+          if (!sysSubs.has(msg.key)) sysSubs.set(msg.key, new Set());
+          sysSubs.get(msg.key).add(cb);
+          setTimeout(() => { const v = sysLoad()[msg.key]; cb({ value: v === undefined ? null : v }); }, 30);
+          return Promise.resolve(() => sysSubs.get(msg.key).delete(cb));
+        },
+      });
+    }
+    function mockCallWS(mode) {
+      return async (msg) => {
+        if (mode === "old") return unknown();
+        if (msg.type === "frontend/get_system_data") return { value: sysLoad()[msg.key] ?? null };
+        if (msg.type === "frontend/set_system_data") {
+          if (mode !== "admin") throw { code: "unauthorized", message: "Unauthorized" };
+          await new Promise((r) => setTimeout(r, 60));
+          const all = sysLoad(); all[msg.key] = msg.value;
+          localStorage.setItem(SYS_KEY, JSON.stringify(all));
+          window.__sysWrites = (window.__sysWrites || []).concat([{ key: msg.key, value: msg.value }]);
+          sysEmit(msg.key);
+          return null;
+        }
+        return unknown();
+      };
+    }
 
     function buildHass(opts) {
       const states = {};
@@ -209,7 +257,7 @@
       set("sensor.test_temp_p3",  "24.1");
       set("sensor.test_temp_p4",  "23.9");
 
-      return { states };
+      return { states, user: { name: "Tester", is_admin: opts.infouser === "admin" }, connection: mockConnection(opts.infouser), callWS: mockCallWS(opts.infouser) };
     }
 
     function buildConfig(opts) {
@@ -261,7 +309,7 @@
 
     const URL_MAP = {
       from: "vfrom", cells: "cells", vdec: "vdec", rdec: "rdec",
-      minw: "minw", pad: "pad", width: "width", bad: "bad", alarm: "alarm",
+      minw: "minw", pad: "pad", width: "width", bad: "bad", alarm: "alarm", infouser: "infouser",
       dsoft: "dsoft", dwarn: "dwarn", dbad: "dbad", cfgunit: "cfgunit", avg: "avg", maxred: "maxred",
     };
 
@@ -290,6 +338,7 @@
         dbad:  $("dbad").value,
         bad:   parseInt($("bad").value, 10),
         alarm: parseInt($("alarm").value, 10),
+        infouser: $("infouser").value,
       };
     }
 
@@ -328,7 +377,7 @@
 
     const HARNESS_DEFAULTS = {
       vfrom: "V", cells: 16, vdec: 3, rdec: 0, minw: 48,
-      pad: "nn", width: 600, bad: "0", alarm: "0",
+      pad: "nn", width: 600, bad: "0", alarm: "0", infouser: "admin",
       dsoft: 2, dwarn: 5, dbad: 10, cfgunit: "", avg: "1", maxred: "0",
     };
 

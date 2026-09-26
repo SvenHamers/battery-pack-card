@@ -15,7 +15,7 @@
  * Click any element to open the matching entity's more-info dialog.
  */
 
-const VERSION = "1.3.7-beta.1";
+const VERSION = "1.4.0-beta.1";
 
 const DEFAULTS = {
   name: "",
@@ -46,6 +46,10 @@ const DEFAULTS = {
   // Lowest cell red / highest green by default. On: the reverse, for people
   // who watch for the top cell running into overvoltage while charging.
   max_cell_red: false,
+  // Free-form label/value rows per pack behind a "More info" button. Stored in
+  // HA (2025.12+), keyed by info_key, else the prefix, SOC entity or name.
+  show_info: true,
+  info_key: "",
 };
 
 const BASIC_SCHEMA = [
@@ -63,6 +67,7 @@ const BASIC_SCHEMA = [
       { name: "show_cells",        selector: { boolean: {} } },
       { name: "show_summary",      selector: { boolean: {} } },
       { name: "show_temperatures", selector: { boolean: {} } },
+      { name: "show_info",         selector: { boolean: {} } },
     ],
   },
 ];
@@ -182,6 +187,12 @@ const ADVANCED_SECTIONS = [
       { name: "max_cell_red", selector: { boolean: {} } },
     ],
   },
+  {
+    title: "Pack info (Home Assistant 2025.12 or newer)",
+    schema: [
+      { name: "info_key", selector: { text: {} } },
+    ],
+  },
 ];
 
 const LABELS = {
@@ -239,6 +250,8 @@ const LABELS = {
   delta_warn: "Summary Δ amber at (mV)",
   delta_bad: "Summary Δ red at (mV)",
   max_cell_red: "Highest cell in red, lowest in green",
+  show_info: "Pack info (More info button)",
+  info_key: "Pack info key (blank = prefix, SOC entity or card title)",
 };
 
 const fmt = (n, d = 0) => {
@@ -316,6 +329,18 @@ const patchChildren = (el, next) => {
   for (let i = want.length; i < have.length; i++) have[i].remove();
 };
 
+// Pack info lives in HA's shared frontend store ("system data", HA 2025.12+):
+// every user and device sees the same rows, only admins can write (HA enforces
+// it), and it survives restarts and is part of backups. One key per pack, so
+// editing one pack can never overwrite another.
+const INFO_KEY_PREFIX = "battery_pack_card.info.";
+const infoFields = (v) => (v && Array.isArray(v.fields) ? v.fields : [])
+  .filter((f) => f && typeof f === "object")
+  .map((f, i) => ({ id: String(f.id || `f${i}`), label: String(f.label ?? ""), value: String(f.value ?? "") }));
+const newFieldId = () => `f_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+const lsGet = (k) => { try { return localStorage.getItem(k); } catch (e) { return null; } };
+const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch (e) { /* private mode etc. */ } };
+
 // ─── Main card ─────────────────────────────────────────────────────────────
 class BatteryPackCard extends HTMLElement {
   static getStubConfig() {
@@ -339,18 +364,35 @@ class BatteryPackCard extends HTMLElement {
     }
     this._config = merged;
     if (!this._root) this._setup();
+    this._syncInfo();
   }
 
   _setup() {
     this.attachShadow({ mode: "open" });
     const wrap = document.createElement("div");
-    wrap.innerHTML = `<style>${this._css()}</style><ha-card><div id="body"></div></ha-card>`;
+    // #info sits outside #body so the per-update render never touches it:
+    // someone typing in the pack info must not have it redrawn under them.
+    wrap.innerHTML = `<style>${this._css()}</style><ha-card><div id="body"></div><div id="info" hidden></div></ha-card>`;
     this.shadowRoot.appendChild(wrap);
     this._root = this.shadowRoot.querySelector("#body");
     this._root.addEventListener("click", (e) => {
-      const el = e.composedPath().find((n) => n.dataset && n.dataset.entity);
+      const path = e.composedPath();
+      if (path.some((n) => n.dataset && n.dataset.action === "info")) return this._toggleInfo();
+      const el = path.find((n) => n.dataset && n.dataset.entity);
       if (el && el.dataset.entity) this._moreInfo(el.dataset.entity);
     });
+    this._infoEl = this.shadowRoot.querySelector("#info");
+    this._infoEl.addEventListener("click", (e) => this._onInfoClick(e));
+    this._infoEl.addEventListener("input", () => this._scheduleInfoSave());
+    this._infoEl.addEventListener("keydown", (e) => this._onInfoKey(e));
+    this._infoEl.addEventListener("pointerdown", (e) => this._onInfoPointer(e));
+  }
+
+  connectedCallback() { this._syncInfo(); }
+
+  disconnectedCallback() {
+    if (this._infoSaveT) this._saveInfo();   // don't lose the last keystrokes
+    this._unsubInfo();
   }
 
   _moreInfo(entityId) {
@@ -362,6 +404,7 @@ class BatteryPackCard extends HTMLElement {
 
   set hass(hass) {
     this._hass = hass;
+    this._syncInfo();
     // Coalesce bursts of state-changed events into one render per frame.
     if (this._rafPending) return;
     this._rafPending = true;
@@ -369,6 +412,254 @@ class BatteryPackCard extends HTMLElement {
       this._rafPending = false;
       this._render();
     });
+  }
+
+  // ─── Pack info ──────────────────────────────────────────────────────────
+  // State: _infoState "off" | "loading" | "ready" | "unsupported";
+  // _infoFields = last known rows; _infoOpen / _infoEditing = UI mode.
+
+  _infoId() {
+    const c = this._config || {};
+    return orNull(c.info_key) || orNull(c.prefix) || orNull(c.entity_soc) || orNull(c.name);
+  }
+
+  _isAdmin() { return this._hass?.user?.is_admin === true; }
+
+  // Keep exactly one live subscription, for this pack's key, while the card
+  // is on screen. Cheap enough to call from every `hass` update.
+  _syncInfo() {
+    const id = this._infoId(), conn = this._hass?.connection;
+    const want = this.isConnected && this._config?.show_info !== false &&
+      conn && id ? INFO_KEY_PREFIX + id : null;
+    if (want === this._infoKey && conn === this._infoConn) {
+      // Same subscription; only the viewer's rights can have changed (the
+      // Edit button follows them).
+      const admin = this._isAdmin();
+      if (admin !== this._infoAdmin) { this._infoAdmin = admin; if (this._infoState === "ready") this._infoChanged(); }
+      return;
+    }
+    if (this._infoSaveT) this._saveInfo();   // flush under the old key first
+    this._unsubInfo();
+    this._infoKey = want;
+    this._infoConn = conn;
+    this._infoAdmin = this._isAdmin();
+    this._infoFields = [];
+    this._infoEditing = false;
+    this._infoState = want ? "loading" : "off";
+    if (!want) return this._infoChanged();
+    this._infoOpen = lsGet(`battery-pack-card:info-open:${id}`) === "1";
+    const key = want;
+    this._infoSub = this._hass.connection.subscribeMessage(
+      (ev) => { if (this._infoKey === key) this._onInfo(ev && ev.value); },
+      { type: "frontend/subscribe_system_data", key },
+    );
+    this._infoSub.catch(() => {        // HA before 2025.12: unknown command
+      if (this._infoKey !== key) return;
+      this._infoSub = null;
+      this._infoState = "unsupported";
+      this._infoChanged();
+    });
+  }
+
+  _unsubInfo() {
+    const sub = this._infoSub;
+    this._infoSub = null;
+    this._infoKey = null;
+    if (sub) sub.then((unsub) => unsub && unsub()).catch(() => {});
+  }
+
+  _onInfo(value) {
+    this._infoState = "ready";
+    const fields = infoFields(value);
+    // Never rebuild the editor under someone's cursor; pick up the latest
+    // version (usually our own save echoed back) when they press Done.
+    if (this._infoEditing) { this._infoPending = fields; return; }
+    this._infoFields = fields;
+    this._infoChanged();
+  }
+
+  _infoChanged() {
+    if (this._hass && this._config) this._render();   // footer button
+    this._renderInfo();
+  }
+
+  _infoButton() {
+    if (this._infoState !== "ready") return "";
+    if (!this._infoFields.length && !this._isAdmin()) return "";
+    const open = !!this._infoOpen;
+    return `<button class="info-toggle" data-action="info" aria-expanded="${open}">${open ? "Less info ▴" : "More info ▾"}</button>`;
+  }
+
+  _toggleInfo() {
+    this._infoOpen = !this._infoOpen;
+    lsSet(`battery-pack-card:info-open:${this._infoId()}`, this._infoOpen ? "1" : "0");
+    if (!this._infoOpen && this._infoEditing) this._finishInfoEdit();
+    this._infoChanged();
+  }
+
+  _renderInfo() {
+    const el = this._infoEl;
+    if (!el) return;
+    const open = this._infoOpen && this._infoState === "ready";
+    el.hidden = !open;
+    if (!open) { el.innerHTML = ""; return; }
+    if (this._infoEditing) return;    // the editor manages its own DOM
+    const admin = this._isAdmin(), f = this._infoFields;
+    el.innerHTML = `
+      <div class="info-head">
+        <div class="section-label">PACK INFO</div>
+        ${admin ? `<button class="info-btn" data-info="edit">Edit</button>` : ""}
+      </div>
+      ${f.length ? `<dl class="info-list">${f.map((x) => `<dt>${this._esc(x.label)}</dt><dd>${this._esc(x.value)}</dd>`).join("")}</dl>`
+                 : `<div class="info-empty">No info yet.${admin ? " Use Edit to add fields like BMS, cells or installation date." : ""}</div>`}
+    `;
+  }
+
+  _infoRowHtml(f) {
+    return `
+      <div class="info-row" data-id="${this._esc(f.id)}">
+        <button class="drag" data-info="drag" title="Drag to reorder (or focus and use ↑ ↓)" aria-label="Move field">⋮⋮</button>
+        <input class="k" placeholder="Label" aria-label="Label" value="${this._esc(f.label)}">
+        <input class="v" placeholder="Value" aria-label="Value" value="${this._esc(f.value)}">
+        <button class="del" data-info="del" title="Remove field" aria-label="Remove field">✕</button>
+      </div>`;
+  }
+
+  _startInfoEdit() {
+    if (!this._isAdmin()) return;
+    this._infoEditing = true;
+    this._infoPending = null;
+    const rows = this._infoFields.length ? this._infoFields : [{ id: newFieldId(), label: "", value: "" }];
+    this._infoEl.innerHTML = `
+      <div class="info-head">
+        <div class="section-label">PACK INFO</div>
+        <span class="info-status" aria-live="polite">Changes save automatically</span>
+        <button class="info-btn primary" data-info="done">Done</button>
+      </div>
+      <div class="info-rows">${rows.map((f) => this._infoRowHtml(f)).join("")}</div>
+      <button class="info-btn add" data-info="add">+ Add field</button>
+    `;
+    const first = this._infoEl.querySelector(this._infoFields.length ? ".v" : ".k");
+    if (first) first.focus();
+  }
+
+  async _finishInfoEdit() {
+    if (this._infoSaveT) await this._saveInfo();
+    this._infoEditing = false;
+    if (this._infoPending) { this._infoFields = this._infoPending; this._infoPending = null; }
+    this._infoChanged();
+  }
+
+  _readInfoRows() {
+    return [...this._infoEl.querySelectorAll(".info-row")].map((r) => ({
+      id: r.dataset.id,
+      label: r.querySelector(".k").value.trim(),
+      value: r.querySelector(".v").value.trim(),
+    }));
+  }
+
+  _setInfoStatus(text, isError) {
+    const st = this._infoEl.querySelector(".info-status");
+    if (!st) return;
+    st.textContent = text;
+    st.classList.toggle("err", !!isError);
+  }
+
+  _scheduleInfoSave() {
+    if (!this._infoEditing) return;
+    this._setInfoStatus("Saving…");
+    clearTimeout(this._infoSaveT);
+    this._infoSaveT = setTimeout(() => this._saveInfo(), 700);
+  }
+
+  async _saveInfo() {
+    clearTimeout(this._infoSaveT);
+    this._infoSaveT = null;
+    const key = this._infoKey;
+    // Only ever save what's in an open editor: saving from a torn-down one
+    // would read zero rows and wipe the pack's info.
+    if (!key || !this._hass || !this._infoEl.querySelector(".info-rows")) return;
+    const fields = this._readInfoRows().filter((f) => f.label || f.value);
+    const seq = (this._infoSaveSeq = (this._infoSaveSeq || 0) + 1);
+    try {
+      await this._hass.callWS({ type: "frontend/set_system_data", key, value: { v: 1, fields } });
+      if (key !== this._infoKey) return;    // flushed while switching packs
+      this._infoFields = fields;
+      if (seq === this._infoSaveSeq) this._setInfoStatus("Saved");
+    } catch (err) {
+      const why = err && err.code === "unauthorized" ? " — only admins can edit" : "";
+      this._setInfoStatus(`Couldn't save${why}`, true);
+    }
+  }
+
+  _onInfoClick(e) {
+    const btn = e.composedPath().find((n) => n.dataset && n.dataset.info);
+    if (!btn) return;
+    const act = btn.dataset.info;
+    if (act === "edit") this._startInfoEdit();
+    else if (act === "done") this._finishInfoEdit();
+    else if (act === "add") {
+      const list = this._infoEl.querySelector(".info-rows");
+      list.insertAdjacentHTML("beforeend", this._infoRowHtml({ id: newFieldId(), label: "", value: "" }));
+      list.lastElementChild.querySelector(".k").focus();
+    } else if (act === "del") {
+      btn.closest(".info-row").remove();
+      this._scheduleInfoSave();
+    }
+  }
+
+  _onInfoKey(e) {
+    const t = e.composedPath()[0];
+    if (!t || !t.classList) return;
+    // Arrow keys on the handle reorder: the keyboard (and screen-reader)
+    // alternative to dragging.
+    if (t.classList.contains("drag") && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
+      e.preventDefault();
+      const row = t.closest(".info-row");
+      const sib = e.key === "ArrowUp" ? row.previousElementSibling : row.nextElementSibling;
+      if (!sib) return;
+      row.parentElement.insertBefore(row, e.key === "ArrowUp" ? sib : sib.nextElementSibling);
+      t.focus();
+      this._scheduleInfoSave();
+    }
+    // Enter in a value jumps to the next row, adding one at the end.
+    if (t.classList.contains("v") && e.key === "Enter") {
+      e.preventDefault();
+      const next = t.closest(".info-row").nextElementSibling;
+      if (next) next.querySelector(".k").focus();
+      else this._infoEl.querySelector('[data-info="add"]').click();
+    }
+  }
+
+  // Pointer-based drag (mouse, touch and pen alike). Listeners go on window:
+  // moving the row re-parents the handle, which drops pointer capture.
+  _onInfoPointer(e) {
+    const handle = e.composedPath().find((n) => n.classList && n.classList.contains("drag"));
+    if (!handle || (e.pointerType === "mouse" && e.button !== 0)) return;
+    e.preventDefault();
+    const row = handle.closest(".info-row"), list = row.parentElement;
+    const order = () => [...list.children].map((r) => r.dataset.id).join();
+    const before = order();
+    row.classList.add("dragging");
+    const move = (ev) => {
+      let target = null;
+      for (const r of list.children) {
+        if (r === row) continue;
+        const b = r.getBoundingClientRect();
+        if (ev.clientY < b.top + b.height / 2) { target = r; break; }
+      }
+      if (target !== row.nextElementSibling) list.insertBefore(row, target);
+    };
+    const end = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", end);
+      window.removeEventListener("pointercancel", end);
+      row.classList.remove("dragging");
+      if (order() !== before) this._scheduleInfoSave();
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", end);
+    window.addEventListener("pointercancel", end);
   }
 
   getCardSize() {
@@ -595,7 +886,10 @@ class BatteryPackCard extends HTMLElement {
         <div class="section-label">TEMPERATURES</div>
         <div class="temps">${tempTiles}</div>` : ""}
 
-      <div class="footer" ${this._dataE(E.runtime)}>Runtime ${this._esc(runtime)}</div>
+      <div class="footer">
+        ${this._infoButton()}
+        <span class="runtime" ${this._dataE(E.runtime)}>Runtime ${this._esc(runtime)}</span>
+      </div>
     `;
     // HA hands every card a new `hass` on any state change in the whole
     // instance, so most renders produce identical output — leave the DOM alone.
@@ -834,7 +1128,56 @@ class BatteryPackCard extends HTMLElement {
       .temp-val   { font-size: 16px; font-weight: 700; font-variant-numeric: tabular-nums; }
 
       .muted { opacity: 0.55; }
-      .footer { font-size: 10px; opacity: 0.4; text-align: right; }
+      .footer { display: flex; align-items: center; gap: 8px; font-size: 10px; min-height: 16px; }
+      .footer .runtime { opacity: 0.4; margin-left: auto; }
+      .info-toggle {
+        font: inherit; font-size: 11px; font-weight: 500; letter-spacing: 0.3px;
+        color: var(--primary-color, #03a9f4); background: none; border: 0; padding: 4px 0; cursor: pointer;
+      }
+      .info-toggle:hover { text-decoration: underline; }
+
+      #info { margin-top: 10px; padding-top: 10px; border-top: 1px solid rgba(127,127,127,0.22); container-type: inline-size; }
+      .info-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+      .info-head .section-label { margin: 0; }
+      .info-status { margin-left: auto; font-size: 10px; opacity: 0.55; }
+      .info-status.err { color: var(--clr-red); opacity: 1; }
+      .info-btn {
+        font: inherit; font-size: 11px; font-weight: 500; padding: 4px 10px; border-radius: 12px; cursor: pointer;
+        color: inherit; background: rgba(127,127,127,0.14); border: 1px solid rgba(127,127,127,0.25);
+      }
+      .info-head .info-btn:first-of-type:not(.primary) { margin-left: auto; }
+      .info-btn.primary { color: #fff; background: var(--primary-color, #03a9f4); border-color: transparent; }
+      .info-btn.add { margin-top: 8px; }
+      .info-list { display: grid; grid-template-columns: fit-content(45%) 1fr; gap: 5px 14px; margin: 0; font-size: 12px; }
+      .info-list dt { opacity: 0.6; overflow-wrap: anywhere; }
+      .info-list dd { margin: 0; font-weight: 500; overflow-wrap: anywhere; }
+      .info-empty { font-size: 12px; opacity: 0.6; }
+      .info-rows { display: flex; flex-direction: column; gap: 6px; }
+      .info-row {
+        display: grid; grid-template-columns: auto minmax(0, 1fr) minmax(0, 1.3fr) auto;
+        grid-template-areas: "drag k v del"; gap: 6px; align-items: center;
+        border-radius: 7px;
+      }
+      .info-row.dragging { opacity: 0.6; background: rgba(127,127,127,0.12); }
+      .info-row .drag { grid-area: drag; }
+      .info-row .k { grid-area: k; }
+      .info-row .v { grid-area: v; }
+      .info-row .del { grid-area: del; }
+      .info-row input {
+        min-width: 0; font: inherit; font-size: 12px; color: inherit; padding: 6px 8px; border-radius: 6px;
+        background: rgba(127,127,127,0.10); border: 1px solid rgba(127,127,127,0.28);
+      }
+      .info-row input:focus { outline: 2px solid var(--primary-color, #03a9f4); outline-offset: -1px; }
+      .info-row .drag, .info-row .del {
+        font: inherit; font-size: 13px; line-height: 1; color: inherit; opacity: 0.6; cursor: pointer;
+        background: none; border: 0; padding: 6px 4px; border-radius: 5px;
+      }
+      .info-row .drag { cursor: grab; touch-action: none; letter-spacing: -2px; }
+      .info-row .drag:hover, .info-row .del:hover, .info-row .drag:focus-visible { opacity: 1; background: rgba(127,127,127,0.15); }
+      /* Narrow card: label above value so both stay readable. */
+      @container (max-width: 330px) {
+        .info-row { grid-template-columns: auto minmax(0, 1fr) auto; grid-template-areas: "drag k del" "drag v del"; }
+      }
     `;
   }
 }
