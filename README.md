@@ -72,6 +72,19 @@ Every visible field on the card can be independently re-pointed to any entity in
 
 In the dashboard editor open the card's "Edit" dialog and switch to the **Advanced** tab; you'll see grouped HA entity-pickers for every field. In YAML use any of the keys below.
 
+### Templates instead of entities
+
+Any entity setting (including per-cell overrides and the cell patterns) can hold a [Home Assistant template](https://www.home-assistant.io/docs/configuration/templating/) instead of an entity ID. Home Assistant renders it and the card uses the result as if it were the entity's state, updating live; unit detection, colouring and formatting work on it as usual. Clicking a templated value opens the first entity the template uses.
+
+In the visual editor, press **{ }** next to a field to switch it from an entity picker to a template editor (with entity autocomplete); a field that held an entity starts as `{{ states('that.entity') }}`. Press it again to go back: a plain `{{ states('x') }}` turns back into the entity.
+
+```yaml
+# Runtime reported in seconds: show hours instead
+entity_runtime: "{{ (states('sensor.bms_master_runtime') | float(0) / 3600) | round(1) }} h"
+# Cells reported in mV by a sensor the card can't detect: convert per cell ({nn} still works)
+cell_voltage_pattern: "{{ states('sensor.pack_cell_{nn}') | float(0) / 1000 }}"
+```
+
 ### Pack metrics
 
 | Key                          | Default (when `prefix: X`)                   | Description                  |
@@ -210,6 +223,22 @@ Info is kept **per battery pack**: by default it's keyed by the card's `prefix`,
 | ----------- | ------- | ----------- |
 | `show_info` | `true`  | Show the **More info** button (it only appears when there is info, or for admins). |
 | `info_key`  | *(prefix, SOC entity or title)* | Pin the pack the info belongs to, e.g. after renaming entities. Cards with the same `info_key` share their info. |
+
+#### Templates
+
+Labels and values may contain [Home Assistant templates](https://www.home-assistant.io/docs/configuration/templating/). They're rendered by Home Assistant and update live whenever an entity they use changes, for everyone viewing the card:
+
+| Label        | Value |
+| ------------ | ----- |
+| Cycles       | `{{ states('sensor.bms_master_cycles') }}` |
+| Installed    | `{{ relative_time(as_datetime('2022-02-01')) }} ago` |
+| Capacity     | `{{ states('sensor.bms_master_capacity_remaining') \| round(0) }} Ah left` |
+
+While editing:
+
+- typing `{{` (or `{%`) closes the block and puts the cursor inside it;
+- suggestions appear as you type: template functions (`states`, `state_attr`, `relative_time`, …), filters after `|` (`round`, `default`, `timestamp_custom`, …), entities inside `states('…')` (this pack's own entities first) and attributes inside `state_attr('entity', '…')`. Pick with ↑ / ↓ and Enter or Tab, or click; Esc closes the list;
+- each field with a template shows what it renders to right now, including any error.
 
 ## Conventions
 

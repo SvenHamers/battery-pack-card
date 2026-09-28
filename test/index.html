@@ -169,10 +169,56 @@
     window.addEventListener("storage", (e) => { if (e.key === SYS_KEY) sysSubs.forEach((_, k) => sysEmit(k)); });
     const unknown = () => Promise.reject({ code: "unknown_command", message: "Unknown command." });
     const conns = {};
+    // ── Mock of render_template, same event contract as real HA ─────────────
+    // {result, listeners} on success; {error, level: "ERROR"} for failures
+    // (the subscription itself still succeeds). Tiny evaluator: states(),
+    // state_attr() and a few filters; re-renders when the harness states change.
+    const tplSubs = new Set();
+    const evalExpr = (expr) => {
+      const st = window.__harnessStates || {};
+      const parts = expr.split("|").map((x) => x.trim());
+      let m, v;
+      if ((m = /^states\(\s*'([^']*)'\s*\)$/.exec(parts[0]))) v = st[m[1]] ? st[m[1]].state : "unknown";
+      else if ((m = /^state_attr\(\s*'([^']*)'\s*,\s*'([^']*)'\s*\)$/.exec(parts[0]))) v = st[m[1]] ? (st[m[1]].attributes || {})[m[2]] : null;
+      else if (/^'.*'$/.test(parts[0])) v = parts[0].slice(1, -1);
+      else if (/^-?\d+(\.\d+)?$/.test(parts[0])) v = Number(parts[0]);
+      else throw new Error(`mock renderer: unsupported expression "${parts[0]}"`);
+      for (const f of parts.slice(1)) {
+        if ((m = /^float(?:\((.*)\))?$/.exec(f))) { const n = parseFloat(v); v = Number.isFinite(n) ? n : Number(m[1] || 0); }
+        else if ((m = /^int(?:\((.*)\))?$/.exec(f))) { const n = parseInt(v, 10); v = Number.isFinite(n) ? n : Number(m[1] || 0); }
+        else if ((m = /^round(?:\((\d*)\))?$/.exec(f))) v = Number(Number(v).toFixed(Number(m[1] || 0)));
+        else if (f === "upper") v = String(v).toUpperCase();
+        else if (f === "lower") v = String(v).toLowerCase();
+        else if (f === "title") v = String(v).replace(/\b\w/g, (c) => c.toUpperCase());
+        else throw new Error(`mock renderer: unsupported filter "${f}"`);
+      }
+      return v;
+    };
+    const renderTpl = (t) => {
+      if ((t.match(/\{\{/g) || []).length !== (t.match(/\}\}/g) || []).length) throw new Error("TemplateSyntaxError: unexpected end of template");
+      return t.replace(/\{\{([\s\S]*?)\}\}/g, (_, e) => { const v = evalExpr(e.trim()); return v == null ? "None" : String(v); });
+    };
+    const runTpl = (sub) => {
+      let ev;
+      const entities = [...sub.template.matchAll(/(?:states|state_attr)\(\s*'([^']+)'/g)].map((m) => m[1]);
+      try { ev = { result: renderTpl(sub.template), listeners: { all: false, domains: [], entities, time: false } }; }
+      catch (e) { ev = { error: e.message, level: "ERROR" }; }
+      const key = JSON.stringify(ev);
+      if (key !== sub.last) { sub.last = key; sub.cb(ev); }
+    };
+    window.__rerenderTemplates = () => tplSubs.forEach(runTpl);
+    window.__tplSubCount = () => tplSubs.size;
+
     function mockConnection(mode) {
       if (conns[mode]) return conns[mode];
       return (conns[mode] = {
         subscribeMessage(cb, msg) {
+          if (msg.type === "render_template") {
+            const sub = { cb, template: msg.template, last: null };
+            tplSubs.add(sub);
+            setTimeout(() => runTpl(sub), 20);
+            return Promise.resolve(() => tplSubs.delete(sub));
+          }
           if (mode === "old" || msg.type !== "frontend/subscribe_system_data") return unknown();
           if (!sysSubs.has(msg.key)) sysSubs.set(msg.key, new Set());
           sysSubs.get(msg.key).add(cb);
@@ -257,6 +303,8 @@
       set("sensor.test_temp_p3",  "24.1");
       set("sensor.test_temp_p4",  "23.9");
 
+      window.__harnessStates = states;
+      setTimeout(() => window.__rerenderTemplates && window.__rerenderTemplates(), 0);
       return { states, user: { name: "Tester", is_admin: opts.infouser === "admin" }, connection: mockConnection(opts.infouser), callWS: mockCallWS(opts.infouser) };
     }
 

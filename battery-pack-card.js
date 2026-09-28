@@ -15,7 +15,7 @@
  * Click any element to open the matching entity's more-info dialog.
  */
 
-const VERSION = "1.4.0";
+const VERSION = "1.5.0-beta.1";
 
 const DEFAULTS = {
   name: "",
@@ -235,8 +235,8 @@ const LABELS = {
   entity_temp_probe_2: "Probe 2 temperature",
   entity_temp_probe_3: "Probe 3 temperature",
   entity_temp_probe_4: "Probe 4 temperature",
-  cell_voltage_pattern: "Cell voltage pattern (uses {n} or {nn})",
-  cell_resistance_pattern: "Cell resistance pattern (uses {n} or {nn})",
+  cell_voltage_pattern: "Cell voltage pattern (uses {n} or {nn}; may be a template)",
+  cell_resistance_pattern: "Cell resistance pattern (uses {n} or {nn}; may be a template)",
   cell_voltage_from: "Cell voltage source unit",
   summary_voltage_from: "Min/avg/max/Δ source unit (blank = same as cells)",
   cell_voltage_decimals: "Cell voltage decimals",
@@ -338,6 +338,76 @@ const infoFields = (v) => (v && Array.isArray(v.fields) ? v.fields : [])
   .filter((f) => f && typeof f === "object")
   .map((f, i) => ({ id: String(f.id || `f${i}`), label: String(f.label ?? ""), value: String(f.value ?? "") }));
 const newFieldId = () => `f_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+// Fields may hold Home Assistant templates. They're rendered by HA itself
+// (render_template, available to every user) and re-render live whenever an
+// entity they read changes.
+const TPL_RE = /\{\{|\{%|\{#/;
+const isTpl = (s) => TPL_RE.test(s || "");
+const tplText = (v) => (v == null ? "" : typeof v === "object" ? JSON.stringify(v) : String(v));
+// One live render_template subscription per template in the wanted set;
+// anything no longer wanted is unsubscribed. `onChange` runs on every render.
+class TemplateSubs {
+  constructor(onChange) { this.map = new Map(); this.onChange = onChange; }
+  get(t) { return this.map.get(t); }
+  clear() { this.sync(null, new Set()); }
+  sync(conn, want) {
+    for (const [t, e] of this.map) {
+      if (want.has(t)) continue;
+      e.unsub.then((u) => u && u()).catch(() => {});
+      this.map.delete(t);
+    }
+    if (!conn) return;
+    for (const t of want) {
+      if (this.map.has(t)) continue;
+      const e = { result: undefined, error: null, entities: [] };
+      e.unsub = conn.subscribeMessage((ev) => {
+        if (ev && "result" in ev) {
+          e.result = ev.result; e.error = null;
+          e.entities = (ev.listeners && ev.listeners.entities) || [];
+        } else if (ev && ev.error && ev.level === "ERROR") e.error = ev.error;   // warnings keep the result
+        this.onChange();
+      }, { type: "render_template", template: t, report_errors: true, timeout: 3 });
+      e.unsub.catch((err) => { e.error = (err && err.message) || "Template error"; this.onChange(); });
+      this.map.set(t, e);
+    }
+  }
+}
+
+// Autocomplete snippets: [name, text to insert, caret steps back from its end, hint]
+const TPL_FUNCS = [
+  ["states", "states('')", 2, "State of an entity"],
+  ["state_attr", "state_attr('', '')", 6, "Attribute of an entity"],
+  ["is_state", "is_state('', '')", 6, "True if an entity has a state"],
+  ["has_value", "has_value('')", 2, "True if an entity is available"],
+  ["state_translated", "state_translated('')", 2, "State in your language"],
+  ["now", "now()", 0, "Current date and time"],
+  ["today_at", "today_at('')", 2, "Today at a time, e.g. '18:00'"],
+  ["relative_time", "relative_time()", 1, "e.g. “3 days” since a datetime"],
+  ["time_since", "time_since()", 1, "Time since a datetime"],
+  ["time_until", "time_until()", 1, "Time until a datetime"],
+  ["as_datetime", "as_datetime()", 1, "Parse into a datetime"],
+  ["as_timestamp", "as_timestamp()", 1, "Datetime to UNIX timestamp"],
+  ["as_local", "as_local()", 1, "Datetime in local time"],
+  ["timedelta", "timedelta(days=)", 1, "A duration, e.g. days=30"],
+  ["area_name", "area_name('')", 2, "Area of an entity or device"],
+  ["iif", "iif(, '', '')", 9, "Inline if: iif(test, yes, no)"],
+];
+const TPL_FILTERS = [
+  ["round", "round(1)", 1, "Round to N decimals"],
+  ["float", "float(0)", 1, "To a number (default if not numeric)"],
+  ["int", "int(0)", 1, "To a whole number"],
+  ["default", "default('')", 2, "Fallback when undefined"],
+  ["timestamp_custom", "timestamp_custom('%d-%m-%Y')", 2, "Format a timestamp"],
+  ["as_datetime", "as_datetime", 0, "Parse into a datetime"],
+  ["as_timestamp", "as_timestamp", 0, "Datetime to UNIX timestamp"],
+  ["relative_time", "relative_time", 0, "e.g. “3 days” since a datetime"],
+  ["replace", "replace('', '')", 6, "Replace text"],
+  ["title", "title", 0, "Title Case"],
+  ["upper", "upper", 0, "UPPER CASE"],
+  ["lower", "lower", 0, "lower case"],
+  ["abs", "abs", 0, "Absolute value"],
+];
+
 const lsGet = (k) => { try { return localStorage.getItem(k); } catch (e) { return null; } };
 const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch (e) { /* private mode etc. */ } };
 
@@ -365,6 +435,7 @@ class BatteryPackCard extends HTMLElement {
     this._config = merged;
     if (!this._root) this._setup();
     this._syncInfo();
+    this._syncCfgTemplates();
   }
 
   _setup() {
@@ -383,16 +454,27 @@ class BatteryPackCard extends HTMLElement {
     });
     this._infoEl = this.shadowRoot.querySelector("#info");
     this._infoEl.addEventListener("click", (e) => this._onInfoClick(e));
-    this._infoEl.addEventListener("input", () => this._scheduleInfoSave());
+    this._infoEl.addEventListener("input", (e) => { this._scheduleInfoSave(); this._onInfoInput(e); });
+    this._infoEl.addEventListener("keyup", (e) => {
+      if (/^(ArrowLeft|ArrowRight|Home|End)$/.test(e.key)) this._acUpdate(e.composedPath()[0]);
+    });
+    this._infoEl.addEventListener("focusout", (e) => {
+      if (!this._ac || e.composedPath()[0] !== this._ac.input) return;
+      setTimeout(() => { if (this._ac && this.shadowRoot.activeElement !== this._ac.input) this._acClose(); }, 0);
+    });
     this._infoEl.addEventListener("keydown", (e) => this._onInfoKey(e));
     this._infoEl.addEventListener("pointerdown", (e) => this._onInfoPointer(e));
   }
 
-  connectedCallback() { this._syncInfo(); }
+  connectedCallback() { this._syncInfo(); this._syncCfgTemplates(); }
 
   disconnectedCallback() {
     if (this._infoSaveT) this._saveInfo();   // don't lose the last keystrokes
     this._unsubInfo();
+    this._acClose();
+    this._tplSync(new Set());
+    if (this._cfgTpl) this._cfgTpl.clear();
+    this._cfgTplSig = null;
   }
 
   _moreInfo(entityId) {
@@ -405,13 +487,41 @@ class BatteryPackCard extends HTMLElement {
   set hass(hass) {
     this._hass = hass;
     this._syncInfo();
-    // Coalesce bursts of state-changed events into one render per frame.
+    this._syncCfgTemplates();
+    this._queueRender();
+  }
+
+  // Coalesce bursts of state-changed events into one render per frame.
+  _queueRender() {
     if (this._rafPending) return;
     this._rafPending = true;
     requestAnimationFrame(() => {
       this._rafPending = false;
       this._render();
     });
+  }
+
+  // Every entity setting (incl. per-cell overrides and patterns) that holds a
+  // template gets one render_template subscription while the card is on
+  // screen. Cheap to call on every update: a signature short-circuits it.
+  _syncCfgTemplates() {
+    this._cfgTpl = this._cfgTpl || new TemplateSubs(() => this._queueRender());
+    if (this._config && this._cfgTplFor !== this._config) {   // only changes with the config
+      this._cfgTplFor = this._config;
+      const all = new Set();
+      Object.values(this._resolveEntities()).forEach((v) => { if (typeof v === "string" && isTpl(v)) all.add(v); });
+      for (let n = 1; n <= (this._config.cells || 0); n++) {
+        for (const k of ["v", "r"]) { const t = this._cellEntity(k, n); if (isTpl(t)) all.add(t); }
+      }
+      this._cfgTplAll = all;
+    }
+    const conn = this._hass && this._hass.connection;
+    const want = this.isConnected && conn && this._cfgTplAll ? this._cfgTplAll : new Set();
+    const sig = [...want].sort().join("\u0000");
+    if (sig === this._cfgTplSig && conn === this._cfgTplConn) return;
+    this._cfgTplSig = sig;
+    this._cfgTplConn = conn;
+    this._cfgTpl.sync(conn, want);
   }
 
   // ─── Pack info ──────────────────────────────────────────────────────────
@@ -502,7 +612,7 @@ class BatteryPackCard extends HTMLElement {
     if (!el) return;
     const open = this._infoOpen && this._infoState === "ready";
     el.hidden = !open;
-    if (!open) { el.innerHTML = ""; return; }
+    if (!open) { el.innerHTML = ""; this._tplSync(new Set()); return; }
     if (this._infoEditing) return;    // the editor manages its own DOM
     const admin = this._isAdmin(), f = this._infoFields;
     el.innerHTML = `
@@ -510,17 +620,43 @@ class BatteryPackCard extends HTMLElement {
         <div class="section-label">PACK INFO</div>
         ${admin ? `<button class="info-btn" data-info="edit">Edit</button>` : ""}
       </div>
-      ${f.length ? `<dl class="info-list">${f.map((x) => `<dt>${this._esc(x.label)}</dt><dd>${this._esc(x.value)}</dd>`).join("")}</dl>`
+      ${f.length ? `<dl class="info-list">${f.map((x) => `<dt>${this._tplCell(x.label)}</dt><dd>${this._tplCell(x.value)}</dd>`).join("")}</dl>`
                  : `<div class="info-empty">No info yet.${admin ? " Use Edit to add fields like BMS, cells or installation date." : ""}</div>`}
     `;
+    this._tplSync(new Set(f.flatMap((x) => [x.label, x.value]).filter(isTpl)));
+    this._tplPaint();
+  }
+
+  _tplCell(text) {
+    return isTpl(text) ? `<span data-tpl="${this._esc(text)}">…</span>` : this._esc(text);
+  }
+
+  // Pack-info templates: subscribed while on screen (open panel or editor),
+  // released for anything that isn't.
+  _tplSync(want) {
+    this._infoTpl = this._infoTpl || new TemplateSubs(() => this._tplPaint());
+    this._infoTpl.sync(this._hass && this._hass.connection, want);
+  }
+
+  _tplPaint() {
+    if (!this._infoEl) return;
+    for (const el of this._infoEl.querySelectorAll("[data-tpl]")) {
+      const e = this._infoTpl && this._infoTpl.get(el.getAttribute("data-tpl"));
+      const err = e && e.error;
+      // The editor preview gets the full error; the read-only list stays compact.
+      el.textContent = !e || (e.result === undefined && !err) ? "…"
+        : err ? (el.closest(".preview") ? `⚠ ${err}` : "⚠ Template error") : tplText(e.result);
+      el.classList.toggle("tpl-err", !!err);
+      if (err) el.title = err; else el.removeAttribute("title");
+    }
   }
 
   _infoRowHtml(f) {
     return `
       <div class="info-row" data-id="${this._esc(f.id)}">
         <button class="drag" data-info="drag" title="Drag to reorder (or focus and use ↑ ↓)" aria-label="Move field">⋮⋮</button>
-        <input class="k" placeholder="Label" aria-label="Label" value="${this._esc(f.label)}">
-        <input class="v" placeholder="Value" aria-label="Value" value="${this._esc(f.value)}">
+        <input class="k" placeholder="Label" aria-label="Label" value="${this._esc(f.label)}" autocomplete="off" spellcheck="false" aria-autocomplete="list">
+        <input class="v" placeholder="Value or {{ template }}" aria-label="Value" value="${this._esc(f.value)}" autocomplete="off" spellcheck="false" aria-autocomplete="list">
         <button class="del" data-info="del" title="Remove field" aria-label="Remove field">✕</button>
       </div>`;
   }
@@ -541,9 +677,33 @@ class BatteryPackCard extends HTMLElement {
     `;
     const first = this._infoEl.querySelector(this._infoFields.length ? ".v" : ".k");
     if (first) first.focus();
+    this._updatePreviews();
+  }
+
+  _schedulePreviews() {
+    clearTimeout(this._prevT);
+    this._prevT = setTimeout(() => this._updatePreviews(), 350);
+  }
+
+  // Under each row that holds a template: what it renders to right now.
+  _updatePreviews() {
+    if (!this._infoEditing) return;
+    const want = new Set();
+    for (const row of this._infoEl.querySelectorAll(".info-row")) {
+      const parts = [row.querySelector(".k").value, row.querySelector(".v").value].filter(isTpl);
+      let pv = row.querySelector(".preview");
+      if (!parts.length) { if (pv) pv.remove(); continue; }
+      parts.forEach((t) => want.add(t));
+      if (!pv) { pv = document.createElement("div"); pv.className = "preview"; row.appendChild(pv); }
+      pv.innerHTML = parts.map((t) => `<span data-tpl="${this._esc(t)}"></span>`).join(" · ");
+    }
+    this._tplSync(want);
+    this._tplPaint();
   }
 
   async _finishInfoEdit() {
+    this._acClose();
+    clearTimeout(this._prevT);
     if (this._infoSaveT) await this._saveInfo();
     this._infoEditing = false;
     if (this._infoPending) { this._infoFields = this._infoPending; this._infoPending = null; }
@@ -593,6 +753,8 @@ class BatteryPackCard extends HTMLElement {
   }
 
   _onInfoClick(e) {
+    const t = e.composedPath()[0];
+    if (t && t.classList && (t.classList.contains("k") || t.classList.contains("v"))) return this._acUpdate(t);
     const btn = e.composedPath().find((n) => n.dataset && n.dataset.info);
     if (!btn) return;
     const act = btn.dataset.info;
@@ -611,6 +773,11 @@ class BatteryPackCard extends HTMLElement {
   _onInfoKey(e) {
     const t = e.composedPath()[0];
     if (!t || !t.classList) return;
+    if (this._ac && t === this._ac.input) {
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); return this._acMove(e.key === "ArrowDown" ? 1 : -1); }
+      if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); return this._acAccept(this._ac.idx); }
+      if (e.key === "Escape") { e.preventDefault(); return this._acClose(); }
+    }
     // Arrow keys on the handle reorder: the keyboard (and screen-reader)
     // alternative to dragging.
     if (t.classList.contains("drag") && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
@@ -618,6 +785,7 @@ class BatteryPackCard extends HTMLElement {
       const row = t.closest(".info-row");
       const sib = e.key === "ArrowUp" ? row.previousElementSibling : row.nextElementSibling;
       if (!sib) return;
+      this._acClose();
       row.parentElement.insertBefore(row, e.key === "ArrowUp" ? sib : sib.nextElementSibling);
       t.focus();
       this._scheduleInfoSave();
@@ -634,9 +802,12 @@ class BatteryPackCard extends HTMLElement {
   // Pointer-based drag (mouse, touch and pen alike). Listeners go on window:
   // moving the row re-parents the handle, which drops pointer capture.
   _onInfoPointer(e) {
+    const item = e.composedPath().find((n) => n.classList && n.classList.contains("ac-item"));
+    if (item) { e.preventDefault(); return this._acAccept(+item.dataset.i); }   // keep focus in the input
     const handle = e.composedPath().find((n) => n.classList && n.classList.contains("drag"));
     if (!handle || (e.pointerType === "mouse" && e.button !== 0)) return;
     e.preventDefault();
+    this._acClose();
     const row = handle.closest(".info-row"), list = row.parentElement;
     const order = () => [...list.children].map((r) => r.dataset.id).join();
     const before = order();
@@ -662,6 +833,134 @@ class BatteryPackCard extends HTMLElement {
     window.addEventListener("pointercancel", end);
   }
 
+  // ─── Template autocomplete ───────────────────────────────────────────────
+  _onInfoInput(e) {
+    const t = e.composedPath()[0];
+    if (!t || !t.classList || !(t.classList.contains("k") || t.classList.contains("v"))) return;
+    // Typing "{{" or "{%" closes the block and leaves the cursor inside it.
+    if (e.inputType === "insertText" && (e.data === "{" || e.data === "%")) {
+      const pos = t.selectionStart, pre = t.value.slice(0, pos), post = t.value.slice(pos);
+      const close = pre.endsWith("{{") ? "}}" : pre.endsWith("{%") ? "%}" : null;
+      if (close && !/^\s*(\}\}|%\})/.test(post)) {
+        t.value = `${pre}  ${close}${post}`;
+        t.setSelectionRange(pos + 1, pos + 1);
+      }
+    }
+    this._schedulePreviews();
+    this._acUpdate(t);
+  }
+
+  // What is being typed at the cursor, if it's inside an open {{ or {% block.
+  _acContext(pre) {
+    const o = Math.max(pre.lastIndexOf("{{"), pre.lastIndexOf("{%"));
+    if (o < 0) return null;
+    const inner = pre.slice(o + 2);
+    if (/\}\}|%\}/.test(inner)) return null;
+    let m;
+    if ((m = /state_attr\(\s*(['"])([\w.]+)\1\s*,\s*['"](\w*)$/.exec(inner))) return { kind: "attr", entity: m[2], partial: m[3] };
+    if ((m = /['"]([\w.]*)$/.exec(inner)) &&
+        (/\b(?:states|state_attr|is_state|is_state_attr|has_value|state_translated|area_name|area_id|device_id|expand|closest)\(\s*$/.test(inner.slice(0, m.index)) ||
+         /^[a-z_]+\./.test(m[1]))) return { kind: "entity", partial: m[1] };
+    if ((m = /\bstates\.([a-z_]+\.?\w*)$/.exec(inner))) return { kind: "entity", partial: m[1], bare: true };
+    if ((m = /\|\s*([a-z_]*)$/.exec(inner))) return { kind: "filter", partial: m[1] };
+    if (!inner.trim()) return { kind: "func", partial: "" };
+    if ((m = /(?:^|[\s(,+\-*/%<>=!])([a-z_]+)$/.exec(inner))) return { kind: "func", partial: m[1] };
+    return null;
+  }
+
+  _acItems(ctx) {
+    const q = ctx.partial.toLowerCase();
+    const pick = (list) => [...list.filter(([n]) => n.startsWith(q)), ...list.filter(([n]) => !n.startsWith(q) && n.includes(q))]
+      .slice(0, 8).map(([name, insert, back, hint]) => ({ main: name, sub: hint, insert, back }));
+    if (ctx.kind === "func") return pick(TPL_FUNCS);
+    if (ctx.kind === "filter") return pick(TPL_FILTERS);
+    if (ctx.kind === "attr") {
+      const attrs = (this._hass.states[ctx.entity] || {}).attributes || {};
+      return Object.keys(attrs).filter((k) => k.toLowerCase().includes(q))
+        .sort((a, b) => (b.toLowerCase().startsWith(q) - a.toLowerCase().startsWith(q)) || a.localeCompare(b))
+        .slice(0, 8).map((k) => ({ main: k, sub: tplText(attrs[k]).slice(0, 40), insert: k, back: 0 }));
+    }
+    // Entities: this pack's own first, then the rest; id matches before name matches.
+    const own = this._packEntities(), prefix = orNull(this._config.prefix);
+    const hits = [];
+    for (const [id, st] of Object.entries(this._hass.states)) {
+      const name = String((st.attributes && st.attributes.friendly_name) || "");
+      const obj = id.slice(id.indexOf(".") + 1);
+      const rank = !q || id.startsWith(q) || obj.startsWith(q) ? 0 : id.includes(q) ? 1 : name.toLowerCase().includes(q) ? 2 : -1;
+      if (rank < 0) continue;
+      const mine = own.has(id) || (prefix && obj.startsWith(`${prefix}_`)) ? 0 : 1;
+      hits.push([mine, rank, id, name, st]);
+    }
+    hits.sort((a, b) => a[0] - b[0] || a[1] - b[1] || a[2].localeCompare(b[2]));
+    return hits.slice(0, 8).map(([, , id, name, st]) => {
+      const unit = st.attributes && st.attributes.unit_of_measurement;
+      return { main: id, sub: `${name ? `${name} · ` : ""}${st.state}${unit ? ` ${unit}` : ""}`, insert: id, back: 0 };
+    });
+  }
+
+  _packEntities() {
+    const set = new Set(Object.values(this._resolveEntities()).filter(Boolean));
+    for (let n = 1; n <= (this._config.cells || 0); n++) { set.add(this._cellEntity("v", n)); set.add(this._cellEntity("r", n)); }
+    return set;
+  }
+
+  _acUpdate(input) {
+    if (!this._infoEditing || !input || !input.classList || !(input.classList.contains("k") || input.classList.contains("v"))) return this._acClose();
+    const pos = input.selectionStart;
+    const ctx = pos === input.selectionEnd ? this._acContext(input.value.slice(0, pos)) : null;
+    const items = ctx ? this._acItems(ctx) : [];
+    if (!items.length) return this._acClose();
+    if (this._ac && this._ac.input !== input) this._acClose();
+    if (!this._ac) {
+      const el = document.createElement("div");
+      el.className = "ac";
+      el.setAttribute("role", "listbox");
+      input.closest(".info-row").appendChild(el);   // inline: can't be clipped by the card or covered by the next one
+      this._ac = { el, input };
+      input.setAttribute("aria-expanded", "true");
+    }
+    Object.assign(this._ac, { ctx, items, idx: 0 });
+    this._ac.el.innerHTML = items.map((it, i) => `
+      <div class="ac-item${i ? "" : " on"}" role="option" aria-selected="${!i}" data-i="${i}">
+        <span class="ac-main">${this._esc(it.main)}</span><span class="ac-sub">${this._esc(it.sub)}</span>
+      </div>`).join("");
+  }
+
+  _acMove(d) {
+    const ac = this._ac, n = ac.items.length;
+    ac.idx = (ac.idx + d + n) % n;
+    ac.el.querySelectorAll(".ac-item").forEach((el, i) => {
+      el.classList.toggle("on", i === ac.idx);
+      el.setAttribute("aria-selected", String(i === ac.idx));
+    });
+  }
+
+  _acAccept(i) {
+    const ac = this._ac, it = ac && ac.items[i];
+    if (!it) return;
+    const inp = ac.input, pos = inp.selectionStart, post = inp.value.slice(pos);
+    const start = pos - ac.ctx.partial.length;
+    let caret = start + it.insert.length - it.back;
+    // After an entity or attribute, step over the quote(s) the snippet already
+    // closed: states('x')| and state_attr('x', '|').
+    if ((ac.ctx.kind === "entity" && !ac.ctx.bare) || ac.ctx.kind === "attr") {
+      const skip = /^(['"]\)|['"],\s*['"]|['"])/.exec(post);
+      if (skip) caret = start + it.insert.length + skip[0].length;
+    }
+    inp.value = inp.value.slice(0, start) + it.insert + post;
+    inp.setSelectionRange(caret, caret);
+    this._acClose();
+    inp.dispatchEvent(new Event("input", { bubbles: true, composed: true }));   // save, preview, next suggestions
+  }
+
+  _acClose() {
+    const ac = this._ac;
+    this._ac = null;
+    if (!ac) return;
+    ac.el.remove();
+    ac.input.setAttribute("aria-expanded", "false");
+  }
+
   getCardSize() {
     const c = this._config || {};
     let n = 2;
@@ -673,10 +972,19 @@ class BatteryPackCard extends HTMLElement {
     return n;
   }
 
-  _state(eid) { return eid ? this._hass?.states[eid]?.state : undefined; }
-  _exists(eid){ return !!(eid && this._hass?.states[eid]); }
+  // Any entity setting may instead hold a template; it reads like a state
+  // once Home Assistant has rendered it (see _syncCfgTemplates).
+  _state(eid) {
+    if (!eid) return undefined;
+    if (isTpl(eid)) {
+      const e = this._cfgTpl && this._cfgTpl.get(eid);
+      return e && !e.error && e.result !== undefined ? tplText(e.result) : undefined;
+    }
+    return this._hass?.states[eid]?.state;
+  }
+  _exists(eid){ return isTpl(eid) ? this._state(eid) !== undefined : !!(eid && this._hass?.states[eid]); }
   _num(eid)   { const v = parseFloat(this._state(eid)); return Number.isFinite(v) ? v : 0; }
-  _on(eid)    { return this._state(eid) === "on"; }
+  _on(eid)    { return /^(on|true)$/i.test(String(this._state(eid))); }
   _raw(eid)   { return parseFloat(this._state(eid)); }
 
   // Effective V scale for a group of readings. The data wins over the
@@ -900,7 +1208,11 @@ class BatteryPackCard extends HTMLElement {
     patchChildren(this._root, next);
   }
 
-  _dataE(eid) { return eid ? `data-entity="${eid}"` : ""; }
+  // Clicking a templated value opens the first entity the template reads.
+  _dataE(eid) {
+    if (isTpl(eid)) { const e = this._cfgTpl && this._cfgTpl.get(eid); eid = e && e.entities[0]; }
+    return eid ? `data-entity="${this._esc(eid)}"` : "";
+  }
 
   _renderBattery(soc, color, capRem, capTot, soh, entityId) {
     const fillH = (Math.max(0, Math.min(100, soc)) / 100) * 210;
@@ -1174,9 +1486,21 @@ class BatteryPackCard extends HTMLElement {
       }
       .info-row .drag { cursor: grab; touch-action: none; letter-spacing: -2px; }
       .info-row .drag:hover, .info-row .del:hover, .info-row .drag:focus-visible { opacity: 1; background: rgba(127,127,127,0.15); }
+      .info-row .preview { grid-column: 2 / 4; order: 1; font-size: 11px; opacity: 0.75; padding: 0 2px 2px; overflow-wrap: anywhere; }
+      .info-row .preview::before { content: "→ "; opacity: 0.6; }
+      .tpl-err { color: var(--clr-red); }
+      .info-row .ac {
+        grid-column: 2 / 4; order: 2; display: flex; flex-direction: column; overflow: hidden;
+        border: 1px solid rgba(127,127,127,0.3); border-radius: 7px; background: rgba(127,127,127,0.08);
+      }
+      .ac-item { display: flex; gap: 10px; align-items: baseline; padding: 6px 9px; cursor: pointer; font-size: 12px; min-width: 0; }
+      .ac-item.on, .ac-item:hover { background: rgba(127,127,127,0.2); }
+      .ac-main { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .ac-sub { margin-left: auto; opacity: 0.6; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
       /* Narrow card: label above value so both stay readable. */
       @container (max-width: 330px) {
         .info-row { grid-template-columns: auto minmax(0, 1fr) auto; grid-template-areas: "drag k del" "drag v del"; }
+        .info-row .preview, .info-row .ac { grid-column: 2 / 3; }
       }
     `;
   }
@@ -1188,6 +1512,9 @@ class BatteryPackCardEditor extends HTMLElement {
     super();
     this._tab = "basic";
     this._advForms = [];
+    this._entRows = [];            // entity-or-template fields (see _entityRow)
+    this._tplForced = new Set();   // fields switched to template mode but still empty
+    this._tplStash = {};           // templates set aside when switching back to an entity
   }
 
   setConfig(config) {
@@ -1253,6 +1580,17 @@ class BatteryPackCardEditor extends HTMLElement {
         }
         .bpc-pane ha-form { display: block; }
         .bpc-pane ha-form + ha-form { margin-top: 8px; }
+        .bpc-fields { display: grid; gap: 8px; }
+        .bpc-fields.two { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+        .bpc-ent { display: flex; align-items: center; gap: 6px; }
+        .bpc-ent ha-selector { flex: 1; min-width: 0; }
+        .bpc-tpl {
+          flex: none; font: 600 12px/1 ui-monospace, SFMono-Regular, Menlo, monospace; padding: 8px 7px;
+          border-radius: 6px; cursor: pointer; color: var(--secondary-text-color); background: none;
+          border: 1px solid var(--divider-color, rgba(0,0,0,0.15));
+        }
+        .bpc-tpl:hover { color: var(--primary-text-color); }
+        .bpc-tpl.on { color: var(--primary-color); border-color: var(--primary-color); }
       </style>
       <div class="bpc-tabs">
         <button type="button" class="bpc-tab" data-tab="basic">Basic</button>
@@ -1284,7 +1622,7 @@ class BatteryPackCardEditor extends HTMLElement {
     const hint = document.createElement("div");
     hint.className = "bpc-hint";
     hint.textContent =
-      "Override individual entity IDs. Any field left blank falls back to the prefix-derived default from the Basic tab.";
+      "Override individual entity IDs. Any field left blank falls back to the prefix-derived default from the Basic tab. Use { } next to a field to enter a template instead of an entity.";
     this._advPane.appendChild(hint);
 
     this._advForms = [];
@@ -1305,14 +1643,20 @@ class BatteryPackCardEditor extends HTMLElement {
     h.textContent = title;
     parent.appendChild(h);
 
+    // Sections made of entity fields get our own rows, so each field can
+    // carry an entity/template toggle next to it (ha-form has no room for one).
+    const flat = schema.flatMap((it) => (it.type === "grid" ? it.schema : [it]));
+    if (flat.length && flat.every((it) => it.selector && it.selector.entity)) {
+      const wrap = document.createElement("div");
+      wrap.className = `bpc-fields${schema.some((it) => it.type === "grid") ? " two" : ""}`;
+      flat.forEach((it) => wrap.appendChild(this._entityRow(it)));
+      parent.appendChild(wrap);
+      return wrap;
+    }
+
     const f = document.createElement("ha-form");
     f.schema = schema;
-    f.computeLabel = (s) => {
-      if (LABELS[s.name]) return LABELS[s.name];
-      const m = /^entity_cell_(\d+)_(volt|ohm)$/.exec(s.name);
-      if (m) return `Cell #${m[1]} ${m[2] === "volt" ? "voltage" : "resistance"}`;
-      return s.name || "";
-    };
+    f.computeLabel = (s) => this._fieldLabel(s.name);
     f.addEventListener("value-changed", (ev) => {
       this._dispatch({ ...this._config, ...ev.detail.value });
     });
@@ -1321,8 +1665,80 @@ class BatteryPackCardEditor extends HTMLElement {
     return f;
   }
 
+  _fieldLabel(name) {
+    if (LABELS[name]) return LABELS[name];
+    const m = /^entity_cell_(\d+)_(volt|ohm)$/.exec(name || "");
+    if (m) return `Cell #${m[1]} ${m[2] === "volt" ? "voltage" : "resistance"}`;
+    return name || "";
+  }
+
+  // An entity picker by default; "{ }" swaps it for HA's template editor
+  // (with its own entity autocomplete). The card renders either.
+  _entityRow(item) {
+    const row = document.createElement("div");
+    row.className = "bpc-ent";
+    const sel = document.createElement("ha-selector");
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "bpc-tpl";
+    btn.textContent = "{ }";
+    row.append(sel, btn);
+    const rec = { name: item.name, entitySelector: item.selector, sel, btn, mode: null };
+    sel.addEventListener("value-changed", (ev) => { ev.stopPropagation(); this._setField(item.name, ev.detail.value); });
+    btn.addEventListener("click", () => this._toggleTemplate(rec));
+    this._entRows.push(rec);
+    return row;
+  }
+
+  _isTemplateMode(name) {
+    return isTpl(this._config[name]) || this._tplForced.has(name);
+  }
+
+  _setField(name, value) {
+    const cfg = { ...this._config };
+    if (value === undefined || value === null || value === "") delete cfg[name];
+    else cfg[name] = value;
+    this._dispatch(cfg);
+    this._updateActiveTab();
+  }
+
+  _toggleTemplate(rec) {
+    const cur = this._config[rec.name];
+    if (this._isTemplateMode(rec.name)) {
+      // Back to an entity: a plain {{ states('x') }} becomes x again; anything
+      // richer is set aside for this session in case the click was a mistake.
+      this._tplForced.delete(rec.name);
+      const m = typeof cur === "string" && /^\s*\{\{\s*states\(\s*['"]([\w.]+)['"]\s*\)\s*\}\}\s*$/.exec(cur);
+      if (cur && !m) this._tplStash[rec.name] = cur;
+      this._setField(rec.name, m ? m[1] : undefined);
+    } else {
+      this._tplForced.add(rec.name);
+      const next = this._tplStash[rec.name] ||
+        (typeof cur === "string" && cur ? `{{ states('${cur}') }}` : undefined);
+      if (next !== undefined && next !== cur) this._setField(rec.name, next);
+      else this._updateActiveTab();
+    }
+  }
+
+  _updateEntityRows() {
+    for (const r of this._entRows) {
+      const tpl = this._isTemplateMode(r.name);
+      r.sel.hass = this._hass;
+      if (r.mode !== tpl) {   // only swap the inner selector when the mode flips
+        r.mode = tpl;
+        r.sel.selector = tpl ? { template: {} } : r.entitySelector;
+        r.btn.classList.toggle("on", tpl);
+        r.btn.setAttribute("aria-pressed", String(tpl));
+        r.btn.title = tpl ? "Use an entity instead" : "Use a template instead of an entity";
+      }
+      r.sel.label = this._fieldLabel(r.name);
+      r.sel.value = this._config[r.name] ?? (tpl ? "" : undefined);
+    }
+  }
+
   _rebuildCellSections(N) {
     // Tear down whatever's there
+    this._entRows = this._entRows.filter((r) => !this._cellSlot.contains(r.sel));
     this._cellSlot.innerHTML = "";
     this._cellForms.forEach((f) => {
       const idx = this._advForms.indexOf(f);
@@ -1376,6 +1792,7 @@ class BatteryPackCardEditor extends HTMLElement {
         f.hass = this._hass;
         f.data = this._config;
       }
+      this._updateEntityRows();
     }
   }
 }
