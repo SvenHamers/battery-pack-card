@@ -178,6 +178,9 @@ The card stores voltages internally in V and resistances in Ω. **Voltage units 
 | `cells_max_columns`          | `8`     | Maximum cell tiles per row. 8 and 16-cell packs render as 1 or 2 full rows on any card wide enough. |
 | `cells_min_width`            | `48`    | Minimum cell-tile width in px. When the card is too narrow for `cells_max_columns` tiles of this width, the grid wraps to fewer columns. |
 | `temperature_unit`           | `auto`  | Temperature display: `auto` shows the value as Home Assistant reports it (HA converts temperature sensors to your unit system, e.g. °F), `C` or `F` converts. The tile colours always follow the real temperature, whatever the unit. |
+| `temp_cold`                  | `5` °C / `41` °F   | Temperature tiles turn **blue** below this.   |
+| `temp_warm`                  | `35` °C / `95` °F  | … **amber** from this (green in between).     |
+| `temp_hot`                   | `50` °C / `122` °F | … **red** from this. The three are set in the unit the card shows (`temperature_unit`, or on `auto` Home Assistant's own unit); leave them blank for the defaults. Sorted before use; negative values are fine. |
 
 ### Cell colouring thresholds
 

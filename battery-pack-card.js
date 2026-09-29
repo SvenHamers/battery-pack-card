@@ -38,6 +38,11 @@ const DEFAULTS = {
   // "auto" shows temperatures as Home Assistant reports them; "C" / "F"
   // converts. The colours always follow the real temperature either way.
   temperature_unit: "auto",
+  // Temperature colour bands, in the unit the card shows (blank = 5 / 35 /
+  // 50 °C, or the same in °F): blue below cold, amber from warm, red from hot.
+  temp_cold: "",
+  temp_warm: "",
+  temp_hot: "",
   // Cell tint bands, in mV of deviation from the pack average. Packs differ in
   // how much spread is normal, so these are configurable rather than fixed.
   cell_dev_soft: 2,
@@ -79,6 +84,7 @@ const ENT_SENSOR = { entity: { domain: "sensor" } };
 const ENT_BIN    = { entity: { domain: "binary_sensor" } };
 // Threshold fields are all "a number of millivolts", so they share one selector.
 const MV_BAND    = { number: { min: 0, max: 500, step: 0.5, mode: "box" } };
+const TEMP_BAND  = { number: { min: -60, max: 250, step: 0.5, mode: "box" } };
 
 const ADVANCED_SECTIONS = [
   {
@@ -199,6 +205,20 @@ const ADVANCED_SECTIONS = [
     ],
   },
   {
+    title: "Temperature colours (in the unit the card shows)",
+    schema: [
+      {
+        type: "grid",
+        name: "",
+        schema: [
+          { name: "temp_cold", selector: TEMP_BAND },
+          { name: "temp_warm", selector: TEMP_BAND },
+          { name: "temp_hot",  selector: TEMP_BAND },
+        ],
+      },
+    ],
+  },
+  {
     title: "Pack info (Home Assistant 2025.12 or newer)",
     schema: [
       { name: "info_key", selector: { text: {} } },
@@ -256,6 +276,9 @@ const LABELS = {
   cells_min_width: "Cell tile min width (px)",
   cells_max_columns: "Cell grid max columns",
   temperature_unit: "Temperature unit",
+  temp_cold: "Blue below (default 5 °C / 41 °F)",
+  temp_warm: "Amber from (default 35 °C / 95 °F)",
+  temp_hot: "Red from (default 50 °C / 122 °F)",
   cell_dev_soft: "Yellow above (mV)",
   cell_dev_warn: "Orange above (mV)",
   cell_dev_bad: "Red above (mV)",
@@ -297,6 +320,10 @@ const intOr = (v, d) => {
 const numOr = (v, d) => {
   const n = parseFloat(v);
   return Number.isFinite(n) && n >= 0 ? n : d;
+};
+const numOrAny = (v, d) => {   // like numOr, but negatives allowed (temperatures)
+  const n = parseFloat(v);
+  return Number.isFinite(n) ? n : d;
 };
 
 // Cell tint bands in mV from the pack average. Sorted ascending so a
@@ -1319,11 +1346,21 @@ class BatteryPackCard extends HTMLElement {
     const c = val === null ? null : isFahrenheit(unit) ? (val - 32) * 5 / 9 : val;
     const want = String(this._config.temperature_unit || "auto").toUpperCase();
     const shown = c === null ? null : want === "F" ? c * 9 / 5 + 32 : want === "C" ? c : val;
-    const color = c === null ? "inherit"
-                : c < 5  ? "var(--clr-blue)"
-                : c < 35 ? "var(--clr-green)"
-                : c < 50 ? "var(--clr-amber)"
-                :          "var(--clr-red)";
+    // Bands are set in the unit the card shows: the chosen one, or on "auto"
+    // Home Assistant's own (what the user sees everywhere else).
+    const inF = want === "F" || (want !== "C" && isFahrenheit(this._hass?.config?.unit_system?.temperature));
+    const toBand = (x) => (inF ? x * 9 / 5 + 32 : x);
+    const [cold, warm, hot] = [
+      numOrAny(this._config.temp_cold, toBand(5)),
+      numOrAny(this._config.temp_warm, toBand(35)),
+      numOrAny(this._config.temp_hot,  toBand(50)),
+    ].sort((a, b) => a - b);
+    const t = c === null ? null : toBand(c);
+    const color = t === null ? "inherit"
+                : t < cold ? "var(--clr-blue)"
+                : t < warm ? "var(--clr-green)"
+                : t < hot  ? "var(--clr-amber)"
+                :            "var(--clr-red)";
     return `
       <div class="temp" ${this._dataE(entityId)} role="button">
         <div class="temp-label">${this._esc(label)}</div>
