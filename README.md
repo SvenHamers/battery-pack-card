@@ -177,6 +177,7 @@ The card stores voltages internally in V and resistances in Ω. **Voltage units 
 | `cell_resistance_decimals`   | `0`     | Decimals shown for the mΩ readout under each cell.           |
 | `cells_max_columns`          | `8`     | Maximum cell tiles per row. 8 and 16-cell packs render as 1 or 2 full rows on any card wide enough. |
 | `cells_min_width`            | `48`    | Minimum cell-tile width in px. When the card is too narrow for `cells_max_columns` tiles of this width, the grid wraps to fewer columns. |
+| `temperature_unit`           | `auto`  | Temperature display: `auto` shows the value as Home Assistant reports it (HA converts temperature sensors to your unit system, e.g. °F), `C` or `F` converts. The tile colours always follow the real temperature, whatever the unit. |
 
 ### Cell colouring thresholds
 

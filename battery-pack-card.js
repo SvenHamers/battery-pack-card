@@ -15,7 +15,7 @@
  * Click any element to open the matching entity's more-info dialog.
  */
 
-const VERSION = "1.5.0-beta.1";
+const VERSION = "1.5.0-beta.2";
 
 const DEFAULTS = {
   name: "",
@@ -35,6 +35,9 @@ const DEFAULTS = {
   cell_resistance_decimals: 0,
   cells_min_width: 48,
   cells_max_columns: 8,
+  // "auto" shows temperatures as Home Assistant reports them; "C" / "F"
+  // converts. The colours always follow the real temperature either way.
+  temperature_unit: "auto",
   // Cell tint bands, in mV of deviation from the pack average. Packs differ in
   // how much spread is normal, so these are configurable rather than fixed.
   cell_dev_soft: 2,
@@ -166,6 +169,14 @@ const ADVANCED_SECTIONS = [
           { name: "cell_resistance_decimals", selector: { number: { min: 0, max: 4, step: 1, mode: "box" } } },
           { name: "cells_min_width",   selector: { number: { min: 30, max: 200, step: 1, mode: "box" } } },
           { name: "cells_max_columns", selector: { number: { min: 1, max: 32, step: 1, mode: "box" } } },
+          {
+            name: "temperature_unit",
+            selector: { select: { options: [
+              { value: "auto", label: "As Home Assistant reports it" },
+              { value: "C",    label: "°C (Celsius)" },
+              { value: "F",    label: "°F (Fahrenheit)" },
+            ], mode: "dropdown" } },
+          },
         ],
       },
     ],
@@ -244,6 +255,7 @@ const LABELS = {
   cell_resistance_decimals: "Cell resistance decimals (mΩ)",
   cells_min_width: "Cell tile min width (px)",
   cells_max_columns: "Cell grid max columns",
+  temperature_unit: "Temperature unit",
   cell_dev_soft: "Yellow above (mV)",
   cell_dev_warn: "Orange above (mV)",
   cell_dev_bad: "Red above (mV)",
@@ -407,6 +419,10 @@ const TPL_FILTERS = [
   ["lower", "lower", 0, "lower case"],
   ["abs", "abs", 0, "Absolute value"],
 ];
+
+// Home Assistant converts temperature sensors to the system's unit (°F on US
+// setups), so a reading's unit has to come from the entity, not be assumed.
+const isFahrenheit = (u) => /^\s*°?\s*F\s*$/i.test(String(u || "")) || u === "℉";
 
 const lsGet = (k) => { try { return localStorage.getItem(k); } catch (e) { return null; } };
 const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch (e) { /* private mode etc. */ } };
@@ -1295,15 +1311,23 @@ class BatteryPackCard extends HTMLElement {
     // Entity exists but is unavailable/unknown → show a dash, not 0°.
     const raw = parseFloat(this._state(entityId));
     const val = Number.isFinite(raw) ? raw : null;
-    const color = val === null ? "inherit"
-                : val < 5  ? "var(--clr-blue)"
-                : val < 35 ? "var(--clr-green)"
-                : val < 50 ? "var(--clr-amber)"
-                :            "var(--clr-red)";
+    // Work in °C for the colour bands; a template's result is taken to be in
+    // HA's own unit, since that's what states() returns for converted sensors.
+    const unit = isTpl(entityId)
+      ? this._hass?.config?.unit_system?.temperature
+      : this._hass?.states[entityId]?.attributes?.unit_of_measurement;
+    const c = val === null ? null : isFahrenheit(unit) ? (val - 32) * 5 / 9 : val;
+    const want = String(this._config.temperature_unit || "auto").toUpperCase();
+    const shown = c === null ? null : want === "F" ? c * 9 / 5 + 32 : want === "C" ? c : val;
+    const color = c === null ? "inherit"
+                : c < 5  ? "var(--clr-blue)"
+                : c < 35 ? "var(--clr-green)"
+                : c < 50 ? "var(--clr-amber)"
+                :          "var(--clr-red)";
     return `
       <div class="temp" ${this._dataE(entityId)} role="button">
         <div class="temp-label">${this._esc(label)}</div>
-        <div class="temp-val" style="color:${color};">${val === null ? "—" : fmt(val, 1) + "°"}</div>
+        <div class="temp-val" style="color:${color};">${shown === null ? "—" : fmt(shown, 1) + "°"}</div>
       </div>
     `;
   }
