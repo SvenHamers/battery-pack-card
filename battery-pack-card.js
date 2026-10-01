@@ -15,7 +15,7 @@
  * Click any element to open the matching entity's more-info dialog.
  */
 
-const VERSION = "1.6.0-beta.1";
+const VERSION = "1.6.0";
 
 const DEFAULTS = {
   name: "",
@@ -1932,17 +1932,24 @@ class BatteryPackCardEditor extends HTMLElement {
   }
 }
 
-customElements.define("battery-pack-card", BatteryPackCard);
-customElements.define("battery-pack-card-editor", BatteryPackCardEditor);
+// Another copy may already be registered (a second resource, or one bundled
+// with an integration). The first copy wins; defining twice would throw and
+// stop this file before it loads the stacked card.
+if (!customElements.get("battery-pack-card")) {
+  customElements.define("battery-pack-card", BatteryPackCard);
+  customElements.define("battery-pack-card-editor", BatteryPackCardEditor);
 
-window.customCards = window.customCards || [];
-window.customCards.push({
-  type: "battery-pack-card",
-  name: "Battery Pack Card",
-  description: "Visual battery card: SOC silhouette, cell array, status pills.",
-  preview: false,
-  documentationURL: "https://github.com/SvenHamers/battery-pack-card",
-});
+  window.customCards = window.customCards || [];
+  window.customCards.push({
+    type: "battery-pack-card",
+    name: "Battery Pack Card",
+    description: "Visual battery card: SOC silhouette, cell array, status pills.",
+    preview: false,
+    documentationURL: "https://github.com/SvenHamers/battery-pack-card",
+  });
+} else if (customElements.get("battery-pack-card") !== BatteryPackCard) {
+  console.warn(`BATTERY-PACK-CARD v${VERSION}: another copy of battery-pack-card was registered first and is the one in use. Remove the extra dashboard resource so only one copy loads.`);
+}
 
 // The stacked card ships as battery-stacked-pack-card.js next to this file.
 // HACS downloads it too but registers only this file as a dashboard resource,

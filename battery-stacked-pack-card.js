@@ -18,7 +18,7 @@
  */
 
 (() => {
-const VERSION = "1.6.0-beta.1";
+const VERSION = "1.6.0";
 if (customElements.get("battery-stacked-pack-card")) return;
 
 const DEFAULTS = {
@@ -125,7 +125,9 @@ class BatteryStackedPackCard extends HTMLElement {
     (this._sources || []).forEach((s) => s.setSummaryLive(false));
     this._sources = [];
     const Pack = customElements.get("battery-pack-card");
-    if (!Pack || !Pack.summarySource) {
+    this._incompatible = !!Pack && typeof Pack.summarySource !== "function";
+    if (this._incompatible) return;   // an older copy won the registration; see _renderHead
+    if (!Pack) {
       if (!this._waiting) {
         this._waiting = true;
         customElements.whenDefined("battery-pack-card").then(() => {
@@ -232,6 +234,7 @@ class BatteryStackedPackCard extends HTMLElement {
     if (!this._config || !this._cab) return;
     const sums = (this._sources || []).map((s) => s.summary());
     const c = this._config;
+    this._cab.hidden = !!this._incompatible;
 
     // SOC extremes, as the cell grid marks its lowest and highest cell.
     let minI = -1, maxI = -1;
@@ -316,6 +319,7 @@ class BatteryStackedPackCard extends HTMLElement {
     }).join("");
     return `
       <div class="s-head"><div class="s-title">${esc(c.name)}</div>${pill}</div>
+      ${this._incompatible ? `<div class="empty warn">An older Battery Pack Card is loaded in this browser, from a second dashboard resource or bundled with an integration, and the stacked card needs v${VERSION} or newer. Remove the extra copy so only the HACS one loads, then reload.</div>` : ""}
       ${tiles ? `<div class="totals">${tiles}</div>` : ""}
       ${this._packCfgs.length ? "" : `<div class="empty">No packs yet. Add them in the card editor, or under <code>packs:</code> in YAML.</div>`}`;
   }
@@ -417,6 +421,7 @@ const CSS = `
   .tot .k { font-size: 10px; letter-spacing: 1px; opacity: 0.55; }
   .tot .v { font-size: 16px; font-weight: 600; margin-top: 2px; font-variant-numeric: tabular-nums; white-space: nowrap; }
   .empty { font-size: 13px; opacity: 0.7; padding: 8px 0; }
+  .empty.warn { opacity: 1; color: var(--clr-red); line-height: 1.4; }
 
   /* The cabinet: at most --max-cols boxes per row, fewer once a box would
      drop below --box-min (same rule as the cell grid). */

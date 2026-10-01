@@ -10,6 +10,8 @@ A visual Lovelace card for Home Assistant that renders a 4s–32s lithium batter
 
 Every region is clickable and opens the matching entity's more-info dialog.
 
+**Lots of batteries, not much screen?** A full card per pack quickly fills a dashboard, especially on a phone or wall tablet. The same install also brings a second card, [**Battery Stacked Pack Card**](#battery-stacked-pack-card): all packs at a glance, drawn as battery cases stacked in a cabinet, and tapping one opens its full Battery Pack Card. Pick it under "Add card" like any other card.
+
 ## Works out of the box with…
 
 …the [**jean-luc1203/jkbms-rs485-addon**](https://github.com/jean-luc1203/jkbms-rs485-addon) integration. The Basic configuration only needs a `prefix:` and you're done — all sensors, binary sensors, cell entities, temperatures and the alarm signals are derived automatically from that prefix and match the addon's default entity naming.
@@ -250,11 +252,11 @@ While editing:
 
 ## Battery Stacked Pack Card
 
-*Beta, since 1.6.0-beta.1.* For banks of several packs: each pack is drawn as its battery case (− and + terminals, a screen, RUN / ALM lights), stacked in a cabinet. Tap a pack to open its full Battery Pack Card, under its row or in a popup.
+*Since 1.6.0.* For banks of several packs. With four, eight or sixteen batteries, a full Battery Pack Card for each one takes a lot of scrolling, and on a phone or wall tablet you only ever see one or two of them. This second card shows the whole bank in one card: each pack is drawn as its battery case (− and + terminals, a screen, RUN / ALM lights), stacked in a cabinet, so you see at once which pack is low, out of balance or in alarm. Tap a pack to open its full Battery Pack Card, under its row or in a popup.
 
 ![Battery Stacked Pack Card](docs/stacked-pack-card.jpg)
 
-It comes with the same HACS install; add it with "Add Card" → **Battery Stacked Pack Card**. The editor has a **Bank** tab for the options below and one tab per pack, holding the regular Battery Pack Card editor. **+ Add pack** starts from a copy of the last pack, so usually only the name and prefix need changing.
+It comes with the same HACS install, nothing extra to download: on a dashboard choose "Add card" and pick **Battery Stacked Pack Card**, next to the regular **Battery Pack Card**. The editor has a **Bank** tab for the options below and one tab per pack, holding the regular Battery Pack Card editor. **+ Add pack** starts from a copy of the last pack, so usually only the name and prefix need changing.
 
 ```yaml
 type: custom:battery-stacked-pack-card
@@ -290,6 +292,8 @@ Each pack's screen shows its SOC (with a bar), voltage, current, cell Δ and its
 | `entity_capacity_remaining` | entity  | —              | Bank remaining capacity tile. |
 
 The bank tiles only show for the entities you set; with none set there is no tile row. The alarm badge in the header only shows when at least one pack has an alarm entity.
+
+If the card says an older Battery Pack Card is loaded, the browser loads a second copy of `battery-pack-card.js` (an old `/local/…` resource, or one bundled with an integration) that registered first. Remove it so only the HACS copy loads, then reload.
 
 ## Conventions
 
