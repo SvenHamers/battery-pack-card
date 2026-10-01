@@ -1,0 +1,769 @@
+/**
+ * battery-stacked-pack-card — many battery packs at a glance, drawn as their
+ * cases stacked in a cabinet. Tapping a pack opens the full battery-pack-card
+ * for it, under its row or in a popup.
+ *
+ *   type: custom:battery-stacked-pack-card
+ *   name: Battery Bank
+ *   packs:                       # each entry takes the battery-pack-card options
+ *     - name: Pack 1
+ *       prefix: jk_pack1
+ *     - name: Pack 2
+ *       prefix: jk_pack2
+ *   pack_defaults:               # optional, merged under every pack
+ *     cells: 16
+ *
+ * Loaded by battery-pack-card.js (HACS registers only that file); it relies on
+ * that card for entity resolution and for the detail view.
+ */
+
+(() => {
+const VERSION = "1.6.0-beta.1";
+if (customElements.get("battery-stacked-pack-card")) return;
+
+const DEFAULTS = {
+  name: "Battery Bank",
+  layout: "grid",        // "grid" = cabinet with up to `columns` per row, "stack" = one column
+  columns: 4,
+  box_min_width: 130,    // px; rows hold fewer boxes before one gets narrower than this
+  detail: "inline",      // "inline" = opens under the pack's row, "popup" = dialog
+  highlight_soc: true,   // red border on the lowest SOC pack, green on the highest
+  show_legend: true,
+  // Bank totals: each tile only shows when its entity is set.
+  entity_soc: "",
+  entity_voltage: "",
+  entity_current: "",
+  entity_power: "",
+  entity_capacity_remaining: "",
+  pack_defaults: {},
+  packs: [],
+};
+
+// [config key, label, default unit, decimals, signed]
+const TOTALS = [
+  ["entity_soc",                "SOC",       "%",  0, false, "var(--clr-green)"],
+  ["entity_voltage",            "VOLTAGE",   "V",  2, false, "var(--clr-amber)"],
+  ["entity_current",            "CURRENT",   "A",  1, true,  "var(--clr-blue)"],
+  ["entity_power",              "POWER",     "W",  0, true,  "var(--clr-purple)"],
+  ["entity_capacity_remaining", "REMAINING", "Ah", 0, false, "var(--clr-grey)"],
+];
+
+const fmt = (n, d = 0, signed = false) => {
+  if (n === null || n === undefined || Number.isNaN(n)) return "—";
+  const s = Number(n).toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d });
+  return signed && n > 0 ? `+${s}` : s;
+};
+const fin = (v) => typeof v === "number" && Number.isFinite(v);
+const esc = (s) => (s === null || s === undefined ? "" : String(s).replace(/[&<>"']/g, (c) => ({
+  "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+}[c])));
+const intOr = (v, d) => { const n = parseInt(v, 10); return Number.isFinite(n) && n > 0 ? n : d; };
+const socColor = (s) => (s > 50 ? "var(--clr-green)" : s > 20 ? "var(--clr-orange)" : "var(--clr-red)");
+
+// Every pack's effective battery-pack-card config.
+const packConfigs = (cfg) => (Array.isArray(cfg.packs) ? cfg.packs : []).map((p, i) => {
+  const c = { ...(cfg.pack_defaults || {}), ...(p || {}) };
+  if (!c.name) c.name = `Pack ${i + 1}`;
+  return c;
+});
+
+class BatteryStackedPackCard extends HTMLElement {
+  static getStubConfig() {
+    return {
+      name: "Battery Bank",
+      packs: [
+        { name: "Pack 1", prefix: "bms_1" },
+        { name: "Pack 2", prefix: "bms_2" },
+      ],
+    };
+  }
+  static getConfigElement() {
+    return document.createElement("battery-stacked-pack-card-editor");
+  }
+
+  setConfig(config) {
+    if (!config) throw new Error("Configuration required");
+    this._config = { ...DEFAULTS, ...config };
+    this._packCfgs = packConfigs(this._config);
+    if (!this.shadowRoot) this._setup();
+    this._open = -1;
+    this._buildSources();
+    this._buildCabinet();
+    this._queue();
+  }
+
+  set hass(hass) {
+    this._hass = hass;
+    (this._sources || []).forEach((s) => { s.hass = hass; });
+    if (this._detailCard) this._detailCard.hass = hass;
+    this._queue();
+  }
+
+  connectedCallback() {
+    (this._sources || []).forEach((s) => s.setSummaryLive(true));
+    if (this._cab && !this._ro) {
+      this._ro = new ResizeObserver(() => this._placeDetail());
+      this._ro.observe(this._cab);
+    }
+  }
+
+  disconnectedCallback() {
+    (this._sources || []).forEach((s) => s.setSummaryLive(false));
+    if (this._ro) { this._ro.disconnect(); this._ro = null; }
+  }
+
+  getCardSize() {
+    const n = (this._packCfgs || []).length;
+    const cols = this._config && this._config.layout === "stack" ? 1 : intOr(this._config && this._config.columns, 4);
+    return 2 + Math.ceil(n / cols) * 3;
+  }
+
+  // One headless battery-pack-card per pack does the entity work; see
+  // BatteryPackCard.summarySource. The pack card may load after this file
+  // when someone registered both as resources, so wait for it.
+  _buildSources() {
+    (this._sources || []).forEach((s) => s.setSummaryLive(false));
+    this._sources = [];
+    const Pack = customElements.get("battery-pack-card");
+    if (!Pack || !Pack.summarySource) {
+      if (!this._waiting) {
+        this._waiting = true;
+        customElements.whenDefined("battery-pack-card").then(() => {
+          this._waiting = false;
+          if (this._config) this.setConfig(this._config);
+          if (this._hass) this.hass = this._hass;
+        });
+      }
+      return;
+    }
+    this._sources = this._packCfgs.map((c) => {
+      const s = Pack.summarySource(c, () => this._queue());
+      s.setSummaryLive(this.isConnected);
+      if (this._hass) s.hass = this._hass;
+      return s;
+    });
+  }
+
+  _queue() {
+    if (this._raf) return;
+    this._raf = true;
+    requestAnimationFrame(() => { this._raf = false; this._render(); });
+  }
+
+  _setup() {
+    this.attachShadow({ mode: "open" });
+    this.shadowRoot.innerHTML = `
+      <style>${CSS}</style>
+      <ha-card>
+        <div id="head"></div>
+        <div id="cab" class="cabinet"></div>
+        <div id="legend"></div>
+      </ha-card>
+      <dialog id="dlg">
+        <div class="dlg-bar">
+          <span class="nav">
+            <button type="button" data-nav="-1" aria-label="Previous pack">‹ Prev</button>
+            <button type="button" data-nav="1" aria-label="Next pack">Next ›</button>
+          </span>
+          <button type="button" data-nav="close">Close ✕</button>
+        </div>
+        <div id="dlg-body"></div>
+      </dialog>`;
+    const r = this.shadowRoot;
+    this._head = r.getElementById("head");
+    this._cab = r.getElementById("cab");
+    this._legend = r.getElementById("legend");
+    this._dlg = r.getElementById("dlg");
+
+    this._head.addEventListener("click", (e) => {
+      const t = e.composedPath().find((n) => n.dataset && n.dataset.entity);
+      if (t) this._moreInfo(t.dataset.entity);
+    });
+    this._cab.addEventListener("click", (e) => {
+      const box = e.composedPath().find((n) => n.classList && n.classList.contains("box"));
+      if (!box) return;
+      const i = Number(box.dataset.i);
+      if (this._config.detail === "popup") this._showPopup(i);
+      else this._toggleInline(i);
+    });
+    this._dlg.addEventListener("click", (e) => {
+      const nav = e.composedPath().find((n) => n.dataset && n.dataset.nav);
+      if (e.target === this._dlg || (nav && nav.dataset.nav === "close")) return this._dlg.close();
+      if (nav) {
+        const n = this._packCfgs.length;
+        this._showPopup((this._open + Number(nav.dataset.nav) + n) % n);
+      }
+    });
+    this._dlg.addEventListener("close", () => { this._open = -1; this._dropDetail(); this._markOpen(); });
+    // A modal dialog makes everything else inert, Home Assistant's own
+    // more-info dialog included; step aside before HA opens it.
+    this._dlg.addEventListener("hass-more-info", () => this._dlg.close());
+    if (this.isConnected) this.connectedCallback();
+  }
+
+  _moreInfo(entityId) {
+    const ev = new Event("hass-more-info", { bubbles: true, composed: true });
+    ev.detail = { entityId };
+    this.dispatchEvent(ev);
+  }
+
+  // Boxes are created once per config and then only have their contents
+  // swapped, so the open detail row (a sibling in the same grid) survives
+  // every state update.
+  _buildCabinet() {
+    if (this._ro) this._ro.disconnect();
+    this._ro = null;
+    this._dropDetail();
+    const c = this._config;
+    this._cab.className = `cabinet${c.layout === "stack" ? " single" : ""}`;
+    this._cab.style.setProperty("--max-cols", c.layout === "stack" ? 1 : intOr(c.columns, 4));
+    this._cab.style.setProperty("--box-min", `${intOr(c.box_min_width, 130)}px`);
+    this._cab.innerHTML = this._packCfgs.map((p, i) =>
+      `<button type="button" class="box" data-i="${i}" style="order:${i * 2}" aria-expanded="false" title="${esc(p.name)}"></button>`,
+    ).join("") + `<div class="bdetail"><div></div></div>`;
+    this._boxes = [...this._cab.querySelectorAll(".box")];
+    this._boxHtml = [];
+    this._detail = this._cab.querySelector(".bdetail");
+    this._headHtml = this._legendHtml = null;
+    if (this.isConnected) this.connectedCallback();
+  }
+
+  _render() {
+    if (!this._config || !this._cab) return;
+    const sums = (this._sources || []).map((s) => s.summary());
+    const c = this._config;
+
+    // SOC extremes, as the cell grid marks its lowest and highest cell.
+    let minI = -1, maxI = -1;
+    if (c.highlight_soc !== false) {
+      const socs = sums.map((s) => (s && fin(s.soc) ? s.soc : null));
+      const known = socs.filter((v) => v !== null);
+      if (known.length > 1 && Math.min(...known) !== Math.max(...known)) {
+        minI = socs.indexOf(Math.min(...known));
+        maxI = socs.indexOf(Math.max(...known));
+      }
+    }
+    this._boxes.forEach((box, i) => {
+      const s = sums[i];
+      const cls = ["box", ...(s ? this._boxState(s) : []), i === minI ? "min" : i === maxI ? "max" : "", i === this._open ? "open" : ""]
+        .filter(Boolean).join(" ");
+      if (box.className !== cls) box.className = cls;
+      const html = this._boxInner(s, this._packCfgs[i]);
+      if (html !== this._boxHtml[i]) { this._boxHtml[i] = html; box.innerHTML = html; }
+      box.style.setProperty("--soc", s && fin(s.soc) ? `${Math.max(0, Math.min(100, s.soc))}%` : "0%");
+      box.style.setProperty("--sc", s && fin(s.soc) ? socColor(s.soc) : "var(--clr-grey)");
+    });
+
+    const head = this._renderHead(sums);
+    if (head !== this._headHtml) { this._headHtml = head; this._head.innerHTML = head; }
+    const legend = c.show_legend !== false ? this._renderLegend(sums, minI >= 0) : "";
+    if (legend !== this._legendHtml) { this._legendHtml = legend; this._legend.innerHTML = legend; }
+  }
+
+  _boxState(s) {
+    const out = [];
+    if (s.alarm) out.push("alarm");
+    else if (s.deltaState === "bad") out.push("d-bad");
+    else if (s.deltaState === "warn") out.push("d-warn");
+    if (s.charge === false && s.discharge === false) out.push("idle");
+    return out;
+  }
+
+  _boxInner(s, p) {
+    if (!s) return `<span class="screen"><span class="scr-big">…</span></span>`;
+    const big = s.soc !== null ? `${fmt(s.soc, 0)}%` : s.voltage !== null ? `${fmt(s.voltage, 1)}<small>V</small>` : "—";
+    const line1 = [
+      s.soc !== null && s.voltage !== null ? `${fmt(s.voltage, 1)}<span class="u">V</span>` : "",
+      s.current !== null ? `${fmt(s.current, 1, true)}<span class="u">A</span>` : "",
+    ].filter(Boolean).join(" ");
+    const line2 = [
+      s.deltaMv !== null ? `Δ${fmt(s.deltaMv, 0)}<span class="u">mV</span>` : "",
+      s.temp ? `${fmt(s.temp.shown, 0)}<span class="u">°</span>` : "",
+    ].filter(Boolean).join(" ");
+    const known = s.charge !== null || s.discharge !== null;
+    const run = known ? !!(s.charge || s.discharge) : s.soc !== null || s.voltage !== null;
+    return `
+      <span class="term neg"></span><span class="term pos"></span>
+      <span class="sign neg">−</span><span class="sign pos">+</span>
+      <span class="breaker"></span>
+      <span class="screen">
+        <span class="scr-big">${big}</span>
+        ${s.soc !== null ? `<span class="scr-bar"><i></i></span>` : ""}
+        ${line1 ? `<span class="scr-line">${line1}</span>` : ""}
+        ${line2 ? `<span class="scr-line">${line2}</span>` : ""}
+      </span>
+      <span class="plabel">${esc(p.name)}</span>
+      <span class="pfoot">
+        <span class="leds"><span><i class="run${run ? " on" : ""}"></i>RUN</span><span><i class="alm${s.alarm ? " on" : ""}"></i>ALM</span></span>
+        <span class="ports"><i class="dry"></i><i></i><i></i></span>
+      </span>`;
+  }
+
+  _renderHead(sums) {
+    const c = this._config, st = (this._hass && this._hass.states) || {};
+    const watched = sums.filter((s) => s && s.alarm !== null);
+    const alarms = watched.filter((s) => s.alarm).length;
+    const pill = watched.length
+      ? `<div class="alarm ${alarms ? "alert" : "ok"}"><span class="dot"></span>${alarms ? `${alarms} pack${alarms > 1 ? "s" : ""} in alarm` : "All packs normal"}</div>`
+      : "";
+    const tiles = TOTALS.filter(([key]) => c[key] && st[c[key]]).map(([key, label, unit, dec, signed, color]) => {
+      const e = st[c[key]];
+      const v = parseFloat(e.state);
+      const u = (e.attributes && e.attributes.unit_of_measurement) || unit;
+      const clr = key === "entity_soc" && Number.isFinite(v) ? socColor(v) : color;
+      return `<div class="tot" style="--c:${clr}" data-entity="${esc(c[key])}" role="button">
+        <div class="k">${label}</div><div class="v">${fmt(Number.isFinite(v) ? v : NaN, dec, signed)}${u === "%" ? "" : " "}${esc(u)}</div></div>`;
+    }).join("");
+    return `
+      <div class="s-head"><div class="s-title">${esc(c.name)}</div>${pill}</div>
+      ${tiles ? `<div class="totals">${tiles}</div>` : ""}
+      ${this._packCfgs.length ? "" : `<div class="empty">No packs yet. Add them in the card editor, or under <code>packs:</code> in YAML.</div>`}`;
+  }
+
+  _renderLegend(sums, extremes) {
+    const first = sums.find(Boolean);
+    if (!first) return "";
+    const c0 = this._packCfgs[0] || {};
+    const warn = Number(c0.delta_warn) || 5, bad = Number(c0.delta_bad) || 15;
+    const [w, b] = [warn, bad].sort((x, y) => x - y);
+    const anyDelta = sums.some((s) => s && s.deltaMv !== null);
+    const anyAlarm = sums.some((s) => s && s.alarm !== null);
+    return `<div class="legend">
+      ${anyDelta ? `<span><b class="sw ok"></b>ok</span><span><b class="sw d-warn"></b>Δ ≥ ${w} mV</span><span><b class="sw d-bad"></b>Δ ≥ ${b} mV</span>` : ""}
+      ${anyAlarm ? `<span><b class="sw alarm"></b>alarm</span>` : ""}
+      ${extremes ? `<span><b class="sw min"></b>lowest SOC</span><span><b class="sw max"></b>highest SOC</span>` : ""}
+    </div>`;
+  }
+
+  // ─── Detail ─────────────────────────────────────────────────────────────
+
+  _makeDetail(i) {
+    const card = document.createElement("battery-pack-card");
+    card.setConfig(this._packCfgs[i]);
+    if (this._hass) card.hass = this._hass;
+    this._detailCard = card;
+    return card;
+  }
+
+  _dropDetail() {
+    this._detailCard = null;
+    if (this._detail) { this._detail.classList.remove("open"); this._detail.firstElementChild.innerHTML = ""; }
+    const body = this.shadowRoot && this.shadowRoot.getElementById("dlg-body");
+    if (body) body.innerHTML = "";
+  }
+
+  _markOpen() {
+    (this._boxes || []).forEach((b, i) => {
+      b.classList.toggle("open", i === this._open);
+      b.setAttribute("aria-expanded", String(i === this._open));
+    });
+  }
+
+  // One detail row for the whole grid, slotted (CSS order) right after the
+  // last box of the tapped box's row, so it opens underneath that row.
+  _placeDetail() {
+    if (this._open < 0 || !this._detail) return;
+    const cols = getComputedStyle(this._cab).gridTemplateColumns.split(" ").filter(Boolean).length || 1;
+    const rowEnd = Math.min(this._boxes.length - 1, Math.floor(this._open / cols) * cols + cols - 1);
+    this._detail.style.order = String(rowEnd * 2 + 1);
+  }
+
+  _toggleInline(i) {
+    if (this._open === i) {
+      this._open = -1;
+      this._detail.classList.remove("open");
+      this._markOpen();
+      setTimeout(() => { if (this._open < 0) this._dropDetail(); }, 260);
+      return;
+    }
+    const wasOpen = this._open >= 0;
+    this._open = i;
+    this._markOpen();
+    this._placeDetail();
+    const slot = this._detail.firstElementChild;
+    slot.innerHTML = "";
+    slot.appendChild(this._makeDetail(i));
+    if (wasOpen) this._detail.classList.add("open");
+    else requestAnimationFrame(() => requestAnimationFrame(() => this._detail.classList.add("open")));
+  }
+
+  _showPopup(i) {
+    this._open = i;
+    this._markOpen();
+    const body = this.shadowRoot.getElementById("dlg-body");
+    body.innerHTML = "";
+    body.appendChild(this._makeDetail(i));
+    this._dlg.querySelector(".nav").hidden = this._packCfgs.length < 2;
+    if (!this._dlg.open) this._dlg.showModal();
+  }
+}
+
+const CSS = `
+  :host {
+    display: block;
+    --clr-green: #4caf50; --clr-amber: #ffc107; --clr-orange: #ff9800;
+    --clr-red: #ef5350; --clr-blue: #42a5f5; --clr-purple: #ab47bc; --clr-grey: #9e9e9e;
+  }
+  ha-card { display: block; padding: 18px 18px 14px; container-type: inline-size; }
+  [data-entity] { cursor: pointer; }
+  .s-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 12px; }
+  .s-title { font-size: 20px; font-weight: 600; letter-spacing: 0.3px; }
+  .s-head .alarm { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 500; padding: 4px 12px; border-radius: 14px; white-space: nowrap; }
+  .s-head .alarm.ok    { color: var(--clr-green); background: rgba(76,175,80,0.13); }
+  .s-head .alarm.alert { color: var(--clr-red);   background: rgba(239,83,80,0.18); }
+  .s-head .alarm .dot  { width: 8px; height: 8px; border-radius: 50%; background: currentColor; box-shadow: 0 0 8px currentColor; }
+  .totals { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 8px; margin-bottom: 14px; }
+  .tot { padding: 8px 12px; background: rgba(255,255,255,0.035); border-left: 3px solid var(--c); border-radius: 7px; }
+  .tot .k { font-size: 10px; letter-spacing: 1px; opacity: 0.55; }
+  .tot .v { font-size: 16px; font-weight: 600; margin-top: 2px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .empty { font-size: 13px; opacity: 0.7; padding: 8px 0; }
+
+  /* The cabinet: at most --max-cols boxes per row, fewer once a box would
+     drop below --box-min (same rule as the cell grid). */
+  .cabinet {
+    --gap: 6px;
+    display: grid; gap: var(--gap);
+    grid-template-columns: repeat(auto-fit, minmax(
+      max(var(--box-min, 130px), calc((100% - (var(--max-cols, 4) - 1) * var(--gap)) / var(--max-cols, 4) - 0.1px)), 1fr));
+    padding: 10px 14px; border-radius: 10px;
+    background:
+      repeating-linear-gradient(180deg, transparent 0 7px, rgba(255,255,255,0.05) 7px 8px) left / 6px 100% no-repeat,
+      repeating-linear-gradient(180deg, transparent 0 7px, rgba(255,255,255,0.05) 7px 8px) right / 6px 100% no-repeat,
+      linear-gradient(#141414, #101010);
+    border: 1px solid rgba(255,255,255,0.07);
+    box-shadow: inset 0 2px 10px rgba(0,0,0,0.6);
+  }
+  .cabinet:empty { display: none; }
+  .cabinet.single { --gap: 3px; max-width: 220px; margin: 0 auto; }
+
+  /* One pack: the front of its case. Sizes are in cqw so the whole face
+     scales with the box. */
+  .box {
+    all: unset; box-sizing: border-box; cursor: pointer; position: relative;
+    aspect-ratio: 4 / 3; container-type: inline-size; color: #fff;
+    font-family: inherit; border-radius: 5px;
+    background: linear-gradient(170deg, #2b2b2b 0%, #1d1d1d 45%, #171717 100%);
+    border: 1px solid rgba(255,255,255,0.09);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.10), inset 5px 0 0 rgba(0,0,0,0.25), 0 3px 6px rgba(0,0,0,0.5);
+    transition: filter 0.15s;
+  }
+  .box:hover { filter: brightness(1.18); }
+  .box:focus-visible { outline: 2px solid var(--clr-blue); outline-offset: 2px; }
+  .box.open { outline: 2px solid var(--primary-color, #03a9f4); outline-offset: 2px; }
+  .box.min { border: 2px solid var(--clr-red);   box-shadow: 0 0 12px rgba(239,83,80,0.4), inset 0 1px 0 rgba(255,255,255,0.1); }
+  .box.max { border: 2px solid var(--clr-green); box-shadow: 0 0 12px rgba(76,175,80,0.4), inset 0 1px 0 rgba(255,255,255,0.1); }
+
+  .term { position: absolute; top: 6%; width: 14%; aspect-ratio: 1; border-radius: 2px; display: grid; place-items: center; }
+  .term::after {
+    content: ""; width: 46%; aspect-ratio: 1; border-radius: 50%;
+    background: radial-gradient(circle at 35% 35%, #f2f2f2, #9a9a9a 60%, #5c5c5c);
+    box-shadow: 0 0 0 1.5px rgba(0,0,0,0.5);
+  }
+  .term.neg { left: 6%;  background: #0d0d0d; box-shadow: inset 0 0 0 1.5px #3a3a3a; }
+  .term.pos { right: 6%; background: linear-gradient(#ff8a2b, #e0650c); box-shadow: inset 0 0 0 1.5px rgba(0,0,0,0.25); }
+  .sign { position: absolute; top: 23%; font-size: 9cqw; font-weight: 700; opacity: 0.55; line-height: 1; }
+  .sign.neg { left: 10.5%; } .sign.pos { right: 10%; }
+  .breaker { position: absolute; left: 8%; top: 38%; width: 8%; height: 22%; border-radius: 2px; background: #0c0c0c; box-shadow: inset 0 0 0 1px #333; }
+  .breaker::after { content: ""; position: absolute; left: 30%; right: 30%; top: 22%; height: 30%; background: #444; border-radius: 1px; }
+  .box.idle .breaker::after { top: 50%; }
+
+  /* The screen, tinted like a cell tile. */
+  .screen {
+    position: absolute; left: 23%; right: 23%; top: 9%; height: 52%;
+    border-radius: 3px; padding: 5% 6%; box-sizing: border-box;
+    --tint: rgba(76,175,80,0.24);
+    background: linear-gradient(var(--tint), var(--tint)), #0c0c0c;
+    border: 1.5px solid #050505;
+    box-shadow: inset 0 0 0 1px rgba(255,255,255,0.06), inset 0 8px 14px rgba(255,255,255,0.04);
+    display: flex; flex-direction: column; justify-content: space-evenly; text-align: center;
+    font-variant-numeric: tabular-nums;
+  }
+  .box.d-warn .screen { --tint: rgba(255,214,0,0.26); }
+  .box.d-bad  .screen { --tint: rgba(255,120,0,0.34); }
+  .box.alarm  .screen { --tint: rgba(239,60,60,0.42); }
+  .scr-big { font-size: 12.5cqw; font-weight: 700; line-height: 1; }
+  .scr-big small { font-size: 0.6em; margin-left: 1px; opacity: 0.7; }
+  .scr-bar { height: 5%; min-height: 3px; border-radius: 2px; background: rgba(0,0,0,0.45); overflow: hidden; }
+  .scr-bar i { display: block; height: 100%; width: var(--soc); background: var(--sc); }
+  .scr-line { font-size: 5.8cqw; line-height: 1.15; opacity: 0.85; white-space: nowrap; overflow: hidden; }
+  .scr-line .u { opacity: 0.55; }
+
+  .plabel {
+    position: absolute; right: 6%; top: 66%; max-width: 62%;
+    font-size: 7.5cqw; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase;
+    color: rgba(255,255,255,0.8); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .pfoot {
+    position: absolute; left: 6%; right: 6%; bottom: 7%;
+    display: flex; justify-content: space-between; align-items: flex-end;
+    font-size: 5.6cqw; letter-spacing: 0.04em; color: rgba(255,255,255,0.55);
+  }
+  .leds { display: flex; gap: 6cqw; align-items: center; }
+  .leds span { display: flex; align-items: center; gap: 1.8cqw; }
+  .leds i { width: 3.6cqw; aspect-ratio: 1; border-radius: 50%; background: #333; }
+  .leds .run.on { background: var(--clr-green); box-shadow: 0 0 5px var(--clr-green); }
+  .leds .alm.on { background: var(--clr-red); box-shadow: 0 0 6px var(--clr-red); animation: blink 1s steps(2) infinite; }
+  @keyframes blink { 50% { opacity: 0.25; } }
+  .ports { display: flex; gap: 1.6cqw; }
+  .ports i { width: 6cqw; height: 4.4cqw; background: #0b0b0b; border: 1px solid #333; border-radius: 1px; }
+  .ports i.dry { background: #3d9a4a; border-color: #2c6e35; }
+  @container (max-width: 115px) { .scr-line, .ports { display: none; } }
+
+  /* Inline detail: a full-width grid row under the tapped box's row. */
+  .bdetail {
+    order: 9999; grid-column: 1 / -1; display: grid; grid-template-rows: 0fr;
+    margin-top: calc(-1 * var(--gap)); transition: grid-template-rows 0.25s ease, margin 0.25s;
+  }
+  .bdetail.open { grid-template-rows: 1fr; margin-top: 0; }
+  .bdetail > div { overflow: hidden; min-height: 0; }
+  .bdetail battery-pack-card { display: block; margin: 4px 0; border: 1px solid var(--primary-color, #03a9f4); border-radius: var(--ha-card-border-radius, 12px); }
+  .cabinet.single .bdetail { width: min(560px, calc(100cqw - 36px)); justify-self: center; }
+
+  .legend { display: flex; flex-wrap: wrap; justify-content: center; gap: 4px 14px; font-size: 11px; opacity: 0.65; margin-top: 10px; }
+  .legend:empty { display: none; }
+  .sw { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+  .sw.ok { background: rgba(76,175,80,0.55); }
+  .sw.d-warn { background: rgba(255,214,0,0.6); }
+  .sw.d-bad { background: rgba(255,120,0,0.75); }
+  .sw.alarm { background: rgba(239,60,60,0.85); }
+  .sw.min { border: 2px solid var(--clr-red); width: 7px; height: 7px; }
+  .sw.max { border: 2px solid var(--clr-green); width: 7px; height: 7px; }
+
+  dialog {
+    padding: 0; border: 0; border-radius: 14px; color: var(--primary-text-color);
+    background: var(--ha-card-background, var(--card-background-color, #1c1c1c));
+    width: min(600px, calc(100vw - 32px)); max-height: calc(100vh - 48px);
+    box-shadow: 0 12px 48px rgba(0,0,0,0.6);
+  }
+  dialog::backdrop { background: rgba(0,0,0,0.6); }
+  .dlg-bar { display: flex; justify-content: space-between; align-items: center; padding: 10px 12px 0 12px; }
+  .dlg-bar button { all: unset; cursor: pointer; padding: 6px 10px; border-radius: 6px; font-size: 13px; color: var(--secondary-text-color); font-family: inherit; }
+  .dlg-bar button:hover { background: rgba(127,127,127,0.12); color: var(--primary-text-color); }
+  .dlg-bar button:focus-visible { outline: 2px solid var(--clr-blue); }
+  .nav { display: flex; gap: 4px; }
+  #dlg-body battery-pack-card { display: block; }
+`;
+
+// ─── Editor ───────────────────────────────────────────────────────────────
+// "Bank" tab for the stack's own options; one tab per pack, each holding the
+// regular battery-pack-card editor for that pack's config.
+
+const ENT = { entity: { domain: "sensor" } };
+const BANK_SCHEMA = [
+  { name: "name", selector: { text: {} } },
+  {
+    type: "grid", name: "", schema: [
+      { name: "layout", selector: { select: { mode: "dropdown", options: [
+        { value: "grid", label: "Cabinet grid" }, { value: "stack", label: "Single stack" }] } } },
+      { name: "detail", selector: { select: { mode: "dropdown", options: [
+        { value: "inline", label: "Under the pack" }, { value: "popup", label: "Popup" }] } } },
+      { name: "columns", selector: { number: { min: 1, max: 8, step: 1, mode: "box" } } },
+      { name: "box_min_width", selector: { number: { min: 90, max: 320, step: 5, mode: "box", unit_of_measurement: "px" } } },
+      { name: "highlight_soc", selector: { boolean: {} } },
+      { name: "show_legend", selector: { boolean: {} } },
+    ],
+  },
+];
+const TOTALS_SCHEMA = TOTALS.map(([name]) => ({ name, selector: ENT }));
+const LABELS = {
+  name: "Title",
+  layout: "Layout",
+  detail: "Pack details open",
+  columns: "Max packs per row",
+  box_min_width: "Min pack width",
+  highlight_soc: "Mark lowest / highest SOC",
+  show_legend: "Show colour legend",
+  entity_soc: "Bank SOC",
+  entity_voltage: "Bank voltage",
+  entity_current: "Bank current",
+  entity_power: "Bank power",
+  entity_capacity_remaining: "Bank remaining capacity",
+};
+
+class BatteryStackedPackCardEditor extends HTMLElement {
+  constructor() {
+    super();
+    this._tab = -1;   // -1 = Bank, otherwise a pack index
+  }
+
+  setConfig(config) {
+    this._config = { ...config, packs: Array.isArray(config.packs) ? [...config.packs] : [] };
+    if (this._tab >= this._config.packs.length) this._tab = -1;
+    this._render();
+  }
+
+  set hass(hass) {
+    this._hass = hass;
+    if (this._packEditor) this._packEditor.hass = hass;
+    this._render();
+  }
+
+  _dispatch(config) {
+    this._config = config;
+    const ev = new Event("config-changed", { bubbles: true, composed: true });
+    ev.detail = { config };
+    this.dispatchEvent(ev);
+  }
+
+  _setPacks(packs, tab) {
+    if (tab !== undefined) this._tab = tab;
+    this._dispatch({ ...this._config, packs });
+    this._render();
+  }
+
+  _render() {
+    if (!this._hass || !this._config) return;
+    if (!this._mounted) this._mount();
+    this._renderTabs();
+    const bank = this._tab < 0;
+    this._bankPane.hidden = !bank;
+    this._packPane.hidden = bank;
+    if (bank) {
+      this._packEditor = null;
+      this._packSlot.innerHTML = "";
+      this._packEditorFor = -1;
+      for (const [form, schema] of [[this._bankForm, BANK_SCHEMA], [this._totalsForm, TOTALS_SCHEMA]]) {
+        form.hass = this._hass;
+        form.schema = schema;
+        form.data = { ...DEFAULTS, ...this._config };
+      }
+      return;
+    }
+    const i = this._tab, packs = this._config.packs;
+    this._packPane.querySelector('[data-act="left"]').disabled = i === 0;
+    this._packPane.querySelector('[data-act="right"]').disabled = i === packs.length - 1;
+    // A fresh pack editor per pack: it keeps per-field UI state (template
+    // toggles) that must not carry over to the next pack.
+    if (this._packEditorFor !== i || !this._packEditor) {
+      this._packEditorFor = i;
+      this._packSlot.innerHTML = "";
+      if (!customElements.get("battery-pack-card-editor")) {
+        this._packSlot.textContent = "battery-pack-card.js is not loaded.";
+        return;
+      }
+      const ed = document.createElement("battery-pack-card-editor");
+      ed.addEventListener("config-changed", (e) => {
+        e.stopPropagation();   // a pack's config, not this card's
+        const next = [...this._config.packs];
+        next[this._packEditorFor] = e.detail.config;
+        this._dispatch({ ...this._config, packs: next });
+        this._renderTabs();
+      });
+      this._packEditor = ed;
+      this._packSlot.appendChild(ed);
+    }
+    this._packEditor.hass = this._hass;
+    this._packEditor.setConfig(packs[i] || {});
+  }
+
+  _mount() {
+    this._mounted = true;
+    this.innerHTML = `
+      <style>
+        battery-stacked-pack-card-editor { display: block; }
+        .bspc-tabs { display: flex; flex-wrap: wrap; gap: 2px; border-bottom: 1px solid var(--divider-color, rgba(0,0,0,0.12)); margin-bottom: 12px; }
+        .bspc-tab {
+          padding: 9px 14px; cursor: pointer; border: none; background: none; font: 500 14px/1.2 inherit;
+          color: var(--secondary-text-color); border-bottom: 2px solid transparent; font-family: inherit;
+        }
+        .bspc-tab:hover { color: var(--primary-text-color); }
+        .bspc-tab.active { color: var(--primary-color); border-bottom-color: var(--primary-color); }
+        .bspc-tab.add { color: var(--primary-color); }
+        .bspc-title {
+          font-size: 12px; font-weight: 600; letter-spacing: 1.5px; text-transform: uppercase;
+          color: var(--secondary-text-color); margin: 18px 0 6px; padding-bottom: 4px;
+          border-bottom: 1px solid var(--divider-color, rgba(0,0,0,0.08));
+        }
+        .bspc-hint { font-size: 12px; color: var(--secondary-text-color); margin: 4px 0 10px; line-height: 1.4; }
+        .bspc-tools { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+        .bspc-tools button {
+          font: 500 13px/1 inherit; font-family: inherit; padding: 7px 10px; border-radius: 6px; cursor: pointer;
+          color: var(--primary-text-color); background: none; border: 1px solid var(--divider-color, rgba(0,0,0,0.15));
+        }
+        .bspc-tools button:disabled { opacity: 0.4; cursor: default; }
+        .bspc-tools button.danger { color: var(--error-color, #db4437); }
+      </style>
+      <div class="bspc-tabs"></div>
+      <div class="bspc-bank">
+        <div class="bspc-form-bank"></div>
+        <div class="bspc-title">Bank totals</div>
+        <div class="bspc-hint">Optional. Each one shows as a tile above the packs; leave a field empty to hide that tile.</div>
+        <div class="bspc-form-totals"></div>
+      </div>
+      <div class="bspc-pack">
+        <div class="bspc-tools">
+          <button type="button" data-act="left">◀ Move</button>
+          <button type="button" data-act="right">Move ▶</button>
+          <button type="button" data-act="dup">Duplicate</button>
+          <button type="button" data-act="remove" class="danger">Remove</button>
+        </div>
+        <div class="bspc-pack-slot"></div>
+      </div>`;
+    this._tabs = this.querySelector(".bspc-tabs");
+    this._bankPane = this.querySelector(".bspc-bank");
+    this._packPane = this.querySelector(".bspc-pack");
+    this._packSlot = this.querySelector(".bspc-pack-slot");
+
+    const form = (sel) => {
+      const f = document.createElement("ha-form");
+      f.computeLabel = (s) => LABELS[s.name] || s.name || "";
+      f.addEventListener("value-changed", (ev) => this._dispatch({ ...this._config, ...ev.detail.value }));
+      this.querySelector(sel).appendChild(f);
+      return f;
+    };
+    this._bankForm = form(".bspc-form-bank");
+    this._totalsForm = form(".bspc-form-totals");
+
+    this._tabs.addEventListener("click", (e) => {
+      const t = e.target.closest(".bspc-tab");
+      if (!t) return;
+      if (t.dataset.tab === "add") {
+        const packs = this._config.packs;
+        // Start from the last pack: packs in one bank usually share their
+        // BMS, so only the name and prefix / entities need changing.
+        const base = packs.length ? { ...packs[packs.length - 1] } : {};
+        base.name = `Pack ${packs.length + 1}`;
+        return this._setPacks([...packs, base], packs.length);
+      }
+      this._tab = Number(t.dataset.tab);
+      this._render();
+    });
+    this._packPane.querySelector(".bspc-tools").addEventListener("click", (e) => {
+      const act = e.target.closest("button") && e.target.closest("button").dataset.act;
+      const i = this._tab, packs = [...this._config.packs];
+      if (!act || i < 0) return;
+      if (act === "left" && i > 0) { [packs[i - 1], packs[i]] = [packs[i], packs[i - 1]]; this._packEditorFor = -1; this._setPacks(packs, i - 1); }
+      if (act === "right" && i < packs.length - 1) { [packs[i + 1], packs[i]] = [packs[i], packs[i + 1]]; this._packEditorFor = -1; this._setPacks(packs, i + 1); }
+      if (act === "dup") { packs.splice(i + 1, 0, { ...packs[i], name: `${packs[i].name || `Pack ${i + 1}`} copy` }); this._setPacks(packs, i + 1); }
+      if (act === "remove") { packs.splice(i, 1); this._packEditorFor = -1; this._setPacks(packs, Math.min(i, packs.length - 1)); }
+    });
+  }
+
+  _renderTabs() {
+    const packs = this._config.packs;
+    const html = [`<button type="button" class="bspc-tab${this._tab < 0 ? " active" : ""}" data-tab="-1">Bank</button>`]
+      .concat(packs.map((p, i) => `<button type="button" class="bspc-tab${this._tab === i ? " active" : ""}" data-tab="${i}">${esc((p && p.name) || `Pack ${i + 1}`)}</button>`))
+      .concat(`<button type="button" class="bspc-tab add" data-tab="add">+ Add pack</button>`)
+      .join("");
+    if (html !== this._tabsHtml) { this._tabsHtml = html; this._tabs.innerHTML = html; }
+  }
+}
+
+customElements.define("battery-stacked-pack-card", BatteryStackedPackCard);
+customElements.define("battery-stacked-pack-card-editor", BatteryStackedPackCardEditor);
+
+window.customCards = window.customCards || [];
+window.customCards.push({
+  type: "battery-stacked-pack-card",
+  name: "Battery Stacked Pack Card",
+  description: "Many battery packs drawn as stacked cases; tap one for its full Battery Pack Card.",
+  preview: false,
+  documentationURL: "https://github.com/SvenHamers/battery-pack-card#battery-stacked-pack-card",
+});
+
+console.info(
+  `%c BATTERY-STACKED-PACK-CARD %c v${VERSION} `,
+  "color:#fff;background:#e0650c;font-weight:700;padding:2px 6px;border-radius:3px 0 0 3px;",
+  "color:#fff;background:#555;padding:2px 6px;border-radius:0 3px 3px 0;"
+);
+})();

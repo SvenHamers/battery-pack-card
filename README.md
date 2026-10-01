@@ -28,9 +28,11 @@ Or do it manually: HACS → Frontend → ⋮ → Custom repositories → add `ht
 
 ### Manual
 
-1. Copy `battery-pack-card.js` to `/config/www/`.
-2. Settings → Dashboards → ⋮ → Resources → add `/local/battery-pack-card.js` as type **JavaScript module**.
+1. Copy `battery-pack-card.js` and `battery-stacked-pack-card.js` to `/config/www/`.
+2. Settings → Dashboards → ⋮ → Resources → add `/local/battery-pack-card.js` as type **JavaScript module**. Only this one: it loads the stacked card file itself.
 3. Hard-refresh.
+
+Without `battery-stacked-pack-card.js` the pack card works as usual; only the [stacked card](#battery-stacked-pack-card) is missing.
 
 ## Usage
 
@@ -245,6 +247,49 @@ While editing:
 - typing `{{` (or `{%`) closes the block and puts the cursor inside it;
 - suggestions appear as you type: template functions (`states`, `state_attr`, `relative_time`, …), filters after `|` (`round`, `default`, `timestamp_custom`, …), entities inside `states('…')` (this pack's own entities first) and attributes inside `state_attr('entity', '…')`. Pick with ↑ / ↓ and Enter or Tab, or click; Esc closes the list;
 - each field with a template shows what it renders to right now, including any error.
+
+## Battery Stacked Pack Card
+
+*Beta, since 1.6.0-beta.1.* For banks of several packs: each pack is drawn as its battery case (− and + terminals, a screen, RUN / ALM lights), stacked in a cabinet. Tap a pack to open its full Battery Pack Card, under its row or in a popup.
+
+![Battery Stacked Pack Card](docs/stacked-pack-card.jpg)
+
+It comes with the same HACS install; add it with "Add Card" → **Battery Stacked Pack Card**. The editor has a **Bank** tab for the options below and one tab per pack, holding the regular Battery Pack Card editor. **+ Add pack** starts from a copy of the last pack, so usually only the name and prefix need changing.
+
+```yaml
+type: custom:battery-stacked-pack-card
+name: Battery Bank
+pack_defaults:          # optional: merged under every pack
+  cells: 16
+packs:                  # each entry takes every Battery Pack Card option
+  - name: Pack 1
+    prefix: jk_pack_1
+  - name: Pack 2
+    prefix: jk_pack_2
+entity_soc: sensor.bank_soc          # optional bank totals
+entity_current: sensor.bank_current
+```
+
+Each pack's screen shows its SOC (with a bar), voltage, current, cell Δ and its warmest temperature, each only when that pack has the entity. The screen is tinted like a cell: green, yellow from `delta_warn`, orange from `delta_bad` (both per pack, default 5 / 15 mV) and red while the pack's alarm is active. The packs with the lowest and highest SOC get a red and green border.
+
+| Option                      | Type    | Default        | Description |
+| --------------------------- | ------- | -------------- | ----------- |
+| `name`                      | string  | `Battery Bank` | Title. |
+| `packs`                     | list    | —              | One Battery Pack Card config per pack. A pack without `name` is called "Pack N". |
+| `pack_defaults`             | map     | —              | Options shared by every pack; a pack's own options win. |
+| `layout`                    | string  | `grid`         | `grid`: a cabinet with up to `columns` packs per row. `stack`: one column, packs on top of each other. |
+| `columns`                   | integer | `4`            | Most packs per row; rows hold fewer when a pack would get narrower than `box_min_width`. |
+| `box_min_width`             | integer | `130`          | Narrowest a pack is drawn, in px. |
+| `detail`                    | string  | `inline`       | `inline`: the pack card opens under the tapped pack's row. `popup`: in a dialog with Prev / Next. |
+| `highlight_soc`             | bool    | `true`         | Border on the lowest (red) and highest (green) SOC pack. |
+| `show_legend`               | bool    | `true`         | Colour legend under the cabinet. |
+| `entity_soc`                | entity  | —              | Bank SOC tile. |
+| `entity_voltage`            | entity  | —              | Bank voltage tile. |
+| `entity_current`            | entity  | —              | Bank current tile. |
+| `entity_power`              | entity  | —              | Bank power tile. |
+| `entity_capacity_remaining` | entity  | —              | Bank remaining capacity tile. |
+
+The bank tiles only show for the entities you set; with none set there is no tile row. The alarm badge in the header only shows when at least one pack has an alarm entity.
 
 ## Conventions
 

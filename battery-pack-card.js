@@ -15,7 +15,7 @@
  * Click any element to open the matching entity's more-info dialog.
  */
 
-const VERSION = "1.5.1";
+const VERSION = "1.6.0-beta.1";
 
 const DEFAULTS = {
   name: "",
@@ -536,6 +536,7 @@ class BatteryPackCard extends HTMLElement {
 
   // Coalesce bursts of state-changed events into one render per frame.
   _queueRender() {
+    if (this._summaryCb) return this._summaryCb();   // headless: the owner renders
     if (this._rafPending) return;
     this._rafPending = true;
     requestAnimationFrame(() => {
@@ -559,7 +560,8 @@ class BatteryPackCard extends HTMLElement {
       this._cfgTplAll = all;
     }
     const conn = this._hass && this._hass.connection;
-    const want = this.isConnected && conn && this._cfgTplAll ? this._cfgTplAll : new Set();
+    const live = this.isConnected || this._summaryLive;
+    const want = live && conn && this._cfgTplAll ? this._cfgTplAll : new Set();
     const sig = [...want].sort().join("\u0000");
     if (sig === this._cfgTplSig && conn === this._cfgTplConn) return;
     this._cfgTplSig = sig;
@@ -632,6 +634,7 @@ class BatteryPackCard extends HTMLElement {
   }
 
   _infoChanged() {
+    if (this._summaryCb) return;
     if (this._hass && this._config) this._render();   // footer button
     this._renderInfo();
   }
@@ -1004,6 +1007,71 @@ class BatteryPackCard extends HTMLElement {
     ac.input.setAttribute("aria-expanded", "false");
   }
 
+  // ─── Headless use (battery-stacked-pack-card) ───────────────────────────
+  // A pack card that never goes on screen: it renders nothing and loads no
+  // pack info, it only resolves this pack's entities (prefix defaults,
+  // overrides, templates, unit detection) and hands back the headline values.
+  static summarySource(config, onChange) {
+    const el = document.createElement("battery-pack-card");
+    el._summaryCb = onChange;
+    el.setConfig(config);
+    return el;
+  }
+
+  // Templates need a live subscription; the owner switches it with its own
+  // connected state, since this element is never connected itself.
+  setSummaryLive(live) {
+    this._summaryLive = !!live;
+    this._syncCfgTemplates();
+  }
+
+  // Values are null when the setting resolves to no entity in HA (show
+  // nothing) and NaN when the entity exists but has no number (show "—").
+  summary() {
+    if (!this._hass || !this._config) return null;
+    const cfg = this._config, E = this._resolveEntities();
+    const val = (eid) => (this._exists(eid) ? this._raw(eid) : null);
+    const has = (eid) => this._exists(eid);
+
+    let deltaMv = null;
+    const sSc = this._voltScaleFor(
+      [E.vMin, E.vAvg, E.vMax].map((e) => this._raw(e)),
+      voltScale(orNull(cfg.summary_voltage_from) || cfg.cell_voltage_from), "Min/avg/max voltages",
+    );
+    if (has(E.vDelta)) deltaMv = this._raw(E.vDelta) * sSc * 1000;
+    else if (has(E.vMin) && has(E.vMax)) deltaMv = (this._raw(E.vMax) - this._raw(E.vMin)) * sSc * 1000;
+    else {
+      const raws = [];
+      for (let n = 1; n <= cfg.cells; n++) raws.push(this._raw(this._cellEntity("v", n)));
+      const vSc = this._voltScaleFor(raws, voltScale(cfg.cell_voltage_from), "Cell voltages");
+      const v = raws.filter((x) => Number.isFinite(x) && x > 0).map((x) => x * vSc);
+      if (v.length > 1) deltaMv = (Math.max(...v) - Math.min(...v)) * 1000;
+    }
+    const dBand = deltaBands(cfg);
+    const deltaState = !Number.isFinite(deltaMv) ? "" : deltaMv >= dBand.bad ? "bad" : deltaMv >= dBand.warn ? "warn" : "ok";
+
+    // Hottest sensor, in the unit the card shows, with its band colour.
+    let temp = null;
+    for (const eid of [E.tMos, E.t1, E.t2, E.t3, E.t4]) {
+      if (!has(eid)) continue;
+      const t = this._tempInfo(eid);
+      if (t.shown !== null && (!temp || t.shown > temp.shown)) temp = t;
+    }
+
+    return {
+      name: cfg.name,
+      soc: val(E.soc), soh: val(E.soh),
+      voltage: val(E.packV), current: val(E.curA), power: val(E.powW),
+      capacityRemaining: val(E.capRem), capacityTotal: val(E.capTot),
+      deltaMv, deltaState, temp,
+      alarm: has(E.alarmB) ? this._on(E.alarmB) : null,
+      alarmText: has(E.alarmS) ? this._state(E.alarmS) : null,
+      charge: has(E.chg) ? this._on(E.chg) : null,
+      discharge: has(E.dch) ? this._on(E.dch) : null,
+      entities: E,
+    };
+  }
+
   getCardSize() {
     const c = this._config || {};
     let n = 2;
@@ -1335,6 +1403,17 @@ class BatteryPackCard extends HTMLElement {
   }
 
   _tempTile(label, entityId) {
+    const { shown, color } = this._tempInfo(entityId);
+    return `
+      <div class="temp" ${this._dataE(entityId)} role="button">
+        <div class="temp-label">${this._esc(label)}</div>
+        <div class="temp-val" style="color:${color};">${shown === null ? "—" : fmt(shown, 1) + "°"}</div>
+      </div>
+    `;
+  }
+
+  // A temperature in the unit the card shows, plus its band colour.
+  _tempInfo(entityId) {
     // Entity exists but is unavailable/unknown → show a dash, not 0°.
     const raw = parseFloat(this._state(entityId));
     const val = Number.isFinite(raw) ? raw : null;
@@ -1361,12 +1440,7 @@ class BatteryPackCard extends HTMLElement {
                 : t < warm ? "var(--clr-green)"
                 : t < hot  ? "var(--clr-amber)"
                 :            "var(--clr-red)";
-    return `
-      <div class="temp" ${this._dataE(entityId)} role="button">
-        <div class="temp-label">${this._esc(label)}</div>
-        <div class="temp-val" style="color:${color};">${shown === null ? "—" : fmt(shown, 1) + "°"}</div>
-      </div>
-    `;
+    return { shown, color };
   }
 
   _esc(s) {
@@ -1869,6 +1943,24 @@ window.customCards.push({
   preview: false,
   documentationURL: "https://github.com/SvenHamers/battery-pack-card",
 });
+
+// The stacked card ships as battery-stacked-pack-card.js next to this file.
+// HACS downloads it too but registers only this file as a dashboard resource,
+// so it is loaded from here, with this file's query string (HACS's ?hacstag=)
+// so the browser cache never pairs a new pack card with an old stack card.
+(() => {
+  if (customElements.get("battery-stacked-pack-card")) return;
+  const own = (document.currentScript && document.currentScript.src) ||
+    (/(https?:\/\/[^\s)]+?battery-pack-card\.js[^\s):]*)/.exec(new Error().stack || "") || [])[1] ||
+    ([...document.querySelectorAll("script[src]")].find((el) => /battery-pack-card\.js/.test(el.src)) || {}).src;
+  if (!own) return;
+  const url = new URL("battery-stacked-pack-card.js", own);
+  url.search = new URL(own).search;
+  import(url.href).catch(() => console.info(
+    "%c BATTERY-PACK-CARD %c battery-stacked-pack-card.js not found next to battery-pack-card.js; the stacked card is unavailable.",
+    "color:#fff;background:#3949ab;border-radius:3px", "color:inherit",
+  ));
+})();
 
 console.info(
   `%c BATTERY-PACK-CARD %c v${VERSION} `,

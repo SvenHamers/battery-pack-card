@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Battery Stacked Pack Card — Local Test Harness</title>
+  <style>
+    html, body { margin: 0; min-height: 100%; }
+    body {
+      font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+      background: #121212; color: #e1e1e1;
+      --primary-text-color: #e1e1e1; --secondary-text-color: #9b9b9b;
+      --primary-color: #03a9f4; --divider-color: rgba(255,255,255,0.12);
+      --card-background-color: #1c1c1c;
+    }
+    .controls {
+      display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: center;
+      padding: 12px 16px; background: #1a1a1a; border-bottom: 1px solid #2a2a2a; font-size: 12px; color: #aaa;
+    }
+    .controls label { display: flex; align-items: center; gap: 8px; }
+    .controls select, .controls input { background: #222; color: #eee; border: 1px solid #383838; border-radius: 4px; padding: 4px 6px; font: inherit; }
+    .stage { padding: 24px 16px; }
+    .frame { margin: 0 auto; max-width: 600px; background: #1c1c1c; border-radius: 12px; box-shadow: 0 4px 24px rgba(0,0,0,0.4); }
+    ha-card { display: block; background: #1c1c1c; border-radius: 12px; box-shadow: 0 4px 24px rgba(0,0,0,0.4); }
+    .err { color: #ef5350; font-family: ui-monospace, monospace; font-size: 12px; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <div class="controls">
+    <label>Packs <input type="range" id="n" min="1" max="16" value="8"> <span id="nv"></span></label>
+    <label>Card width <input type="range" id="w" min="300" max="900" value="600"> <span id="wv"></span></label>
+    <label>Layout <select id="layout"><option value="grid">Cabinet grid</option><option value="stack">Single stack</option></select></label>
+    <label>Detail <select id="detail"><option value="inline">Under the pack</option><option value="popup">Popup</option></select></label>
+    <label>Bank totals <select id="totals"><option value="all">SOC, V, A, Ah</option><option value="none">None set</option></select></label>
+    <label>Pack entities <select id="pack"><option value="full">Full JK-style set</option><option value="min">Only SOC + voltage</option></select></label>
+    <label>State <select id="dir"><option value="chg">Charging</option><option value="dis">Discharging</option></select></label>
+  </div>
+  <div class="stage"><div class="frame" id="frame"></div></div>
+
+  <script>
+    // ?module=1 loads the pack card the way HACS does (type=module with a
+    // ?hacstag=), otherwise as a classic script; both must pull in the stack.
+    const params = new URL(location.href).searchParams;
+    const tag = document.createElement("script");
+    if (params.get("module")) { tag.type = "module"; tag.src = "../battery-pack-card.js?hacstag=12345"; }
+    else tag.src = "../battery-pack-card.js";
+    document.head.appendChild(tag);
+  </script>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const CELLS = 16;
+    const rnd = (seed) => { const x = Math.sin(seed * 9301 + 49297) * 233280; return x - Math.floor(x); };
+
+    function packData(i, dir) {
+      const n = i + 1;
+      const soc = Math.round(42 + rnd(n) * 50);
+      const alarm = n === 5, idle = n === 7;
+      const cur = idle ? 0 : (dir === "dis" ? -1 : 1) * (8 + rnd(n + 30) * 9);
+      const deltaMv = alarm ? 46 : Math.round(1 + rnd(n * 3.7 + 11) * 18);
+      const baseV = 3.20 + soc * 0.0012;
+      const cells = Array.from({ length: CELLS }, (_, c) => {
+        let v = baseV + ((rnd(n * 100 + c) - 0.5) * deltaMv) / 1000;
+        if (c === 3) v = baseV - deltaMv / 2000;
+        if (c === 11) v = baseV + deltaMv / 2000;
+        return v;
+      });
+      return { n, soc, alarm, idle, cur, cells, packV: cells.reduce((a, b) => a + b, 0),
+               temp: 22 + rnd(n + 50) * 6 + (alarm ? 9 : 0), cap: 280 };
+    }
+
+    const noWS = () => Promise.reject({ code: "unknown_command", message: "Unknown command." });
+    function buildHass(packs) {
+      const s = {};
+      const set = (id, v, u) => (s[id] = { state: String(v), attributes: u ? { unit_of_measurement: u } : {} });
+      for (const p of packs) {
+        const k = `p${p.n}`;
+        p.cells.forEach((v, c) => {
+          const idx = String(c + 1).padStart(2, "0");
+          set(`sensor.${k}_cell_voltage_${idx}`, v.toFixed(4), "V");
+          set(`sensor.${k}_cell_resistance_${idx}`, "0.00045", "Ω");
+        });
+        const vmin = Math.min(...p.cells), vmax = Math.max(...p.cells);
+        set(`sensor.${k}_soc`, p.soc, "%"); set(`sensor.${k}_soh`, 97, "%");
+        set(`sensor.${k}_v`, p.packV.toFixed(2), "V"); set(`sensor.${k}_i`, p.cur.toFixed(1), "A");
+        set(`sensor.${k}_p`, Math.round(p.packV * p.cur), "W");
+        set(`sensor.${k}_caprem`, (p.cap * p.soc / 100).toFixed(1), "Ah"); set(`sensor.${k}_captot`, p.cap, "Ah");
+        set(`sensor.${k}_vmin`, vmin.toFixed(4), "V"); set(`sensor.${k}_vmax`, vmax.toFixed(4), "V");
+        set(`sensor.${k}_vdelta`, (vmax - vmin).toFixed(4), "V");
+        set(`sensor.${k}_minc`, p.cells.indexOf(vmin) + 1); set(`sensor.${k}_maxc`, p.cells.indexOf(vmax) + 1);
+        set(`sensor.${k}_alarm`, p.alarm ? "Cell overvoltage" : "Normal");
+        set(`binary_sensor.${k}_alarm`, p.alarm ? "on" : "off");
+        set(`binary_sensor.${k}_chg`, p.idle ? "off" : "on"); set(`binary_sensor.${k}_dis`, p.idle ? "off" : "on");
+        set(`sensor.${k}_tmos`, (p.temp + 6).toFixed(1), "°C"); set(`sensor.${k}_t1`, p.temp.toFixed(1), "°C");
+      }
+      const totCap = packs.reduce((a, p) => a + p.cap, 0), rem = packs.reduce((a, p) => a + p.cap * p.soc / 100, 0);
+      set("sensor.bank_soc", Math.round(rem / totCap * 100), "%");
+      set("sensor.bank_v", (packs.reduce((a, p) => a + p.packV, 0) / packs.length).toFixed(2), "V");
+      set("sensor.bank_i", packs.reduce((a, p) => a + p.cur, 0).toFixed(1), "A");
+      set("sensor.bank_rem", rem.toFixed(0), "Ah");
+      window.__states = s;
+      return { states: s, user: { name: "Mock", is_admin: true }, config: { unit_system: { temperature: "°C" } },
+               connection: { subscribeMessage: noWS }, callWS: noWS };
+    }
+
+    function packConfig(p, mode) {
+      const k = `p${p.n}`;
+      const c = { name: `Pack ${p.n}`, entity_soc: `sensor.${k}_soc`, entity_pack_voltage: `sensor.${k}_v` };
+      if (mode === "min") return c;
+      return Object.assign(c, {
+        cell_voltage_pattern: `sensor.${k}_cell_voltage_{nn}`, cell_resistance_pattern: `sensor.${k}_cell_resistance_{nn}`,
+        entity_soh: `sensor.${k}_soh`, entity_current: `sensor.${k}_i`, entity_power: `sensor.${k}_p`,
+        entity_capacity_remaining: `sensor.${k}_caprem`, entity_capacity_total: `sensor.${k}_captot`,
+        entity_cell_voltage_min: `sensor.${k}_vmin`, entity_cell_voltage_max: `sensor.${k}_vmax`,
+        entity_cell_voltage_delta: `sensor.${k}_vdelta`,
+        entity_cell_min_number: `sensor.${k}_minc`, entity_cell_max_number: `sensor.${k}_maxc`,
+        entity_alarm_status: `sensor.${k}_alarm`, entity_alarm_active: `binary_sensor.${k}_alarm`,
+        entity_switch_charge: `binary_sensor.${k}_chg`, entity_switch_discharge: `binary_sensor.${k}_dis`,
+        entity_temp_mos: `sensor.${k}_tmos`, entity_temp_probe_1: `sensor.${k}_t1`,
+      });
+    }
+
+    let card = null;
+    function render() {
+      try {
+        const n = +$("n").value, w = +$("w").value;
+        $("nv").textContent = n; $("wv").textContent = `${w} px`;
+        $("frame").style.maxWidth = `${w}px`;
+        const packs = Array.from({ length: n }, (_, i) => packData(i, $("dir").value));
+        const config = {
+          type: "custom:battery-stacked-pack-card",
+          name: "Battery Bank",
+          layout: $("layout").value, detail: $("detail").value,
+          pack_defaults: { cells: CELLS },
+          packs: packs.map((p) => packConfig(p, $("pack").value)),
+        };
+        if ($("totals").value === "all") Object.assign(config, {
+          entity_soc: "sensor.bank_soc", entity_voltage: "sensor.bank_v",
+          entity_current: "sensor.bank_i", entity_capacity_remaining: "sensor.bank_rem",
+        });
+        window.__config = config;
+        if (!card) { card = document.createElement("battery-stacked-pack-card"); $("frame").appendChild(card); }
+        card.setConfig(config);
+        card.hass = buildHass(packs);
+      } catch (e) {
+        console.error(e);
+        $("frame").innerHTML = `<div class="err">${e.stack || e}</div>`;
+      }
+    }
+    customElements.whenDefined("battery-stacked-pack-card").then(() => {
+      document.querySelectorAll(".controls input, .controls select").forEach((el) => el.addEventListener("input", render));
+      render();
+    });
+  </script>
+</body>
+</html>
