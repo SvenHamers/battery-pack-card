@@ -31,7 +31,7 @@
     <label>Card width <input type="range" id="w" min="300" max="900" value="600"> <span id="wv"></span></label>
     <label>Layout <select id="layout"><option value="grid">Cabinet grid</option><option value="stack">Single stack</option></select></label>
     <label>Detail <select id="detail"><option value="inline">Under the pack</option><option value="popup">Popup</option></select></label>
-    <label>Bank totals <select id="totals"><option value="all">SOC, V, A, Ah</option><option value="none">None set</option></select></label>
+    <label>Bank totals <select id="totals"><option value="all">SOC, V, A, Ah, W</option><option value="some">SOC + Ah only</option><option value="none">None set</option></select></label>
     <label>Pack entities <select id="pack"><option value="full">Full JK-style set</option><option value="min">Only SOC + voltage</option></select></label>
     <label>State <select id="dir"><option value="chg">Charging</option><option value="dis">Discharging</option></select></label>
   </div>
@@ -97,6 +97,7 @@
       set("sensor.bank_v", (packs.reduce((a, p) => a + p.packV, 0) / packs.length).toFixed(2), "V");
       set("sensor.bank_i", packs.reduce((a, p) => a + p.cur, 0).toFixed(1), "A");
       set("sensor.bank_rem", rem.toFixed(0), "Ah");
+      set("sensor.bank_p", Math.round(packs.reduce((a, p) => a + p.packV * p.cur, 0)), "W");
       window.__states = s;
       return { states: s, user: { name: "Mock", is_admin: true }, config: { unit_system: { temperature: "°C" } },
                connection: { subscribeMessage: noWS }, callWS: noWS };
@@ -135,8 +136,9 @@
         };
         if ($("totals").value === "all") Object.assign(config, {
           entity_soc: "sensor.bank_soc", entity_voltage: "sensor.bank_v",
-          entity_current: "sensor.bank_i", entity_capacity_remaining: "sensor.bank_rem",
+          entity_current: "sensor.bank_i", entity_capacity_remaining: "sensor.bank_rem", entity_power: "sensor.bank_p",
         });
+        if ($("totals").value === "some") Object.assign(config, { entity_soc: "sensor.bank_soc", entity_capacity_remaining: "sensor.bank_rem" });
         window.__config = config;
         if (!card) { card = document.createElement("battery-stacked-pack-card"); $("frame").appendChild(card); }
         card.setConfig(config);

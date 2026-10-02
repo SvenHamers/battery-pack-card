@@ -285,13 +285,15 @@ Each pack's screen shows its SOC (with a bar), voltage, current, cell Δ and its
 | `detail`                    | string  | `inline`       | `inline`: the pack card opens under the tapped pack's row. `popup`: in a dialog with Prev / Next. |
 | `highlight_soc`             | bool    | `true`         | Red border on the lowest and green border on the highest SOC pack. `false` turns both off. In the editor: *Red / green border on lowest / highest SOC pack*. |
 | `show_legend`               | bool    | `true`         | Colour legend under the cabinet. |
-| `entity_soc`                | entity or template | — | Bank SOC tile. |
-| `entity_voltage`            | entity or template | — | Bank voltage tile. |
-| `entity_current`            | entity or template | — | Bank current tile. |
-| `entity_power`              | entity or template | — | Bank power tile. |
-| `entity_capacity_remaining` | entity or template | — | Bank remaining capacity tile. |
+| `entity_soc`                | entity or template | — | Bank SOC, big on the bank unit with a bar under it. |
+| `entity_voltage`            | entity or template | — | Bank voltage. |
+| `entity_current`            | entity or template | — | Bank current; its sign also sets ▲ CHARGING / ▼ DISCHARGING / IDLE. |
+| `entity_power`              | entity or template | — | Bank power (sets the direction when there is no current). |
+| `entity_capacity_remaining` | entity or template | — | Bank remaining capacity. |
 
-The bank tiles only show for the settings you fill in; with none set there is no tile row. Each one takes an entity or, like every entity setting of the pack card, a [template](#templates-instead-of-entities) (press **{ }** next to the field in the editor). That way a stack can show its own totals, for example the remaining capacity of just the three packs on one shelf:
+The bank totals show on a **bank unit**, the top device in the cabinet, like the master BMS or inverter above the packs: RUN / ALM lights (ALM when any pack is in alarm) and a screen with the SOC, the direction and the other values. On a phone or in a single stack it's compact and scales with the cabinet; on a wider card it switches to full labels, and from about 600 px it's one slim row. Only the values you set are shown; with none set there is no bank unit.
+
+Each total takes an entity or, like every entity setting of the pack card, a [template](#templates-instead-of-entities) (press **{ }** next to the field in the editor). That way a stack can show its own totals, for example the remaining capacity of just the three packs on one shelf:
 
 ```yaml
 entity_capacity_remaining: >-
@@ -300,7 +302,7 @@ entity_capacity_remaining: >-
     + states('sensor.shelf_pack_3_capacity_remaining') | float(0)) | round(0) }}
 ```
 
-A template that returns a plain number gets the tile's unit and decimals (`%`, `V`, `A`, `W`, `Ah`); anything else, such as `1,234 Ah`, is shown as it is. Clicking the tile opens the first entity the template reads. The alarm badge in the header only shows when at least one pack has an alarm entity.
+A template that returns a plain number gets the value's unit and decimals (`%`, `V`, `A`, `W`, `Ah`); anything else, such as `1,234 Ah`, is shown as it is. Clicking a value opens its entity, or the first entity its template reads. The alarm badge in the header only shows when at least one pack has an alarm entity.
 
 If the card says an older Battery Pack Card is loaded, the browser loads a second copy of `battery-pack-card.js` (an old `/local/…` resource, or one bundled with an integration) that registered first. Remove it so only the HACS copy loads, then reload.
 
