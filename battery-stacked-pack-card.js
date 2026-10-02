@@ -18,7 +18,7 @@
  */
 
 (() => {
-const VERSION = "1.6.0";
+const VERSION = "1.6.1";
 if (customElements.get("battery-stacked-pack-card")) return;
 
 const DEFAULTS = {
@@ -29,7 +29,7 @@ const DEFAULTS = {
   detail: "inline",      // "inline" = opens under the pack's row, "popup" = dialog
   highlight_soc: true,   // red border on the lowest SOC pack, green on the highest
   show_legend: true,
-  // Bank totals: each tile only shows when its entity is set.
+  // Bank totals: each tile only shows when set, to an entity or a template.
   entity_soc: "",
   entity_voltage: "",
   entity_current: "",
@@ -57,6 +57,36 @@ const fin = (v) => typeof v === "number" && Number.isFinite(v);
 const esc = (s) => (s === null || s === undefined ? "" : String(s).replace(/[&<>"']/g, (c) => ({
   "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
 }[c])));
+// Same template rules as the pack card: anything with {{ / {% / {# is a
+// Home Assistant template, rendered live by HA.
+const isTpl = (s) => typeof s === "string" && /\{\{|\{%|\{#/.test(s);
+// One render_template subscription per wanted template; `onChange` runs on
+// every new result.
+class TemplateSubs {
+  constructor(onChange) { this.map = new Map(); this.onChange = onChange; }
+  get(t) { return this.map.get(t); }
+  sync(conn, want) {
+    for (const [t, e] of this.map) {
+      if (want.has(t) && e.conn === conn) continue;
+      e.unsub.then((u) => u && u()).catch(() => {});
+      this.map.delete(t);
+    }
+    if (!conn) return;
+    for (const t of want) {
+      if (this.map.has(t)) continue;
+      const e = { conn, result: undefined, error: null, entities: [] };
+      e.unsub = conn.subscribeMessage((ev) => {
+        if (ev && "result" in ev) {
+          e.result = ev.result; e.error = null;
+          e.entities = (ev.listeners && ev.listeners.entities) || [];
+        } else if (ev && ev.error && ev.level === "ERROR") e.error = ev.error;   // warnings keep the result
+        this.onChange();
+      }, { type: "render_template", template: t, report_errors: true, timeout: 3 });
+      e.unsub.catch((err) => { e.error = (err && err.message) || "Template error"; this.onChange(); });
+      this.map.set(t, e);
+    }
+  }
+}
 const intOr = (v, d) => { const n = parseInt(v, 10); return Number.isFinite(n) && n > 0 ? n : d; };
 const socColor = (s) => (s > 50 ? "var(--clr-green)" : s > 20 ? "var(--clr-orange)" : "var(--clr-red)");
 
@@ -89,6 +119,7 @@ class BatteryStackedPackCard extends HTMLElement {
     this._open = -1;
     this._buildSources();
     this._buildCabinet();
+    this._syncTemplates();
     this._queue();
   }
 
@@ -96,10 +127,20 @@ class BatteryStackedPackCard extends HTMLElement {
     this._hass = hass;
     (this._sources || []).forEach((s) => { s.hass = hass; });
     if (this._detailCard) this._detailCard.hass = hass;
+    this._syncTemplates();
     this._queue();
   }
 
+  // Templated bank totals: subscribed while the card is on screen.
+  _syncTemplates() {
+    this._tpl = this._tpl || new TemplateSubs(() => this._queue());
+    const c = this._config || {}, conn = this._hass && this._hass.connection;
+    const want = new Set(this.isConnected && conn ? TOTALS.map(([k]) => c[k]).filter(isTpl) : []);
+    this._tpl.sync(conn, want);
+  }
+
   connectedCallback() {
+    this._syncTemplates();
     (this._sources || []).forEach((s) => s.setSummaryLive(true));
     if (this._cab && !this._ro) {
       this._ro = new ResizeObserver(() => this._placeDetail());
@@ -108,6 +149,7 @@ class BatteryStackedPackCard extends HTMLElement {
   }
 
   disconnectedCallback() {
+    this._syncTemplates();
     (this._sources || []).forEach((s) => s.setSummaryLive(false));
     if (this._ro) { this._ro.disconnect(); this._ro = null; }
   }
@@ -309,19 +351,40 @@ class BatteryStackedPackCard extends HTMLElement {
     const pill = watched.length
       ? `<div class="alarm ${alarms ? "alert" : "ok"}"><span class="dot"></span>${alarms ? `${alarms} pack${alarms > 1 ? "s" : ""} in alarm` : "All packs normal"}</div>`
       : "";
-    const tiles = TOTALS.filter(([key]) => c[key] && st[c[key]]).map(([key, label, unit, dec, signed, color]) => {
-      const e = st[c[key]];
-      const v = parseFloat(e.state);
-      const u = (e.attributes && e.attributes.unit_of_measurement) || unit;
-      const clr = key === "entity_soc" && Number.isFinite(v) ? socColor(v) : color;
-      return `<div class="tot" style="--c:${clr}" data-entity="${esc(c[key])}" role="button">
-        <div class="k">${label}</div><div class="v">${fmt(Number.isFinite(v) ? v : NaN, dec, signed)}${u === "%" ? "" : " "}${esc(u)}</div></div>`;
+    const tiles = TOTALS.map(([key, label, unit, dec, signed, color]) => {
+      const t = this._total(c[key], st);
+      if (!t) return "";
+      const n = t.text === null ? parseFloat(t.value) : NaN;
+      const u = t.unit || unit;
+      const shown = t.text !== null ? esc(t.text) : `${fmt(Number.isFinite(n) ? n : NaN, dec, signed)}${u === "%" ? "" : " "}${esc(u)}`;
+      const clr = key === "entity_soc" && Number.isFinite(n) ? socColor(n) : color;
+      return `<div class="tot" style="--c:${clr}" ${t.entity ? `data-entity="${esc(t.entity)}" role="button"` : ""}${t.error ? ` title="${esc(t.error)}"` : ""}>
+        <div class="k">${label}</div><div class="v">${shown}</div></div>`;
     }).join("");
     return `
       <div class="s-head"><div class="s-title">${esc(c.name)}</div>${pill}</div>
       ${this._incompatible ? `<div class="empty warn">An older Battery Pack Card is loaded in this browser, from a second dashboard resource or bundled with an integration, and the stacked card needs v${VERSION} or newer. Remove the extra copy so only the HACS one loads, then reload.</div>` : ""}
       ${tiles ? `<div class="totals">${tiles}</div>` : ""}
       ${this._packCfgs.length ? "" : `<div class="empty">No packs yet. Add them in the card editor, or under <code>packs:</code> in YAML.</div>`}`;
+  }
+
+  // One bank total: an entity's state, or a template's rendered result. A
+  // plain number is formatted with the tile's unit and decimals; anything
+  // else a template returns (say "1,234 Ah") is shown as it is. null = no tile.
+  _total(setting, st) {
+    if (!setting) return null;
+    if (isTpl(setting)) {
+      const e = this._tpl && this._tpl.get(setting);
+      const r = e && !e.error ? e.result : undefined;
+      const entity = (e && e.entities[0]) || null;
+      if (r === undefined || r === null) return { value: NaN, text: null, unit: "", entity, error: e && e.error };
+      const str = typeof r === "object" ? JSON.stringify(r) : String(r).trim();
+      const numeric = /^[-+]?(\d+\.?\d*|\.\d+)(e[-+]?\d+)?$/i.test(str);
+      return { value: numeric ? str : NaN, text: numeric ? null : str, unit: "", entity, error: null };
+    }
+    const e = st[setting];
+    if (!e) return null;
+    return { value: e.state, text: null, unit: e.attributes && e.attributes.unit_of_measurement, entity: setting, error: null };
   }
 
   _renderLegend(sums, extremes) {
@@ -429,7 +492,7 @@ const CSS = `
     --gap: 6px;
     display: grid; gap: var(--gap);
     grid-template-columns: repeat(auto-fit, minmax(
-      max(var(--box-min, 130px), calc((100% - (var(--max-cols, 4) - 1) * var(--gap)) / var(--max-cols, 4) - 0.1px)), 1fr));
+      min(100%, max(var(--box-min, 130px), calc((100% - (var(--max-cols, 4) - 1) * var(--gap)) / var(--max-cols, 4) - 0.1px))), 1fr));
     padding: 10px 14px; border-radius: 10px;
     background:
       repeating-linear-gradient(180deg, transparent 0 7px, rgba(255,255,255,0.05) 7px 8px) left / 6px 100% no-repeat,
@@ -439,7 +502,9 @@ const CSS = `
     box-shadow: inset 0 2px 10px rgba(0,0,0,0.6);
   }
   .cabinet:empty { display: none; }
-  .cabinet.single { --gap: 3px; max-width: 220px; margin: 0 auto; }
+  /* One column, as wide as box_min_width but never narrower than 220px; the
+     cabinet grows with it, so the packs stay inside it and centred. */
+  .cabinet.single { --gap: 3px; max-width: max(220px, var(--box-min, 130px)); margin: 0 auto; }
 
   /* One pack: the front of its case. Sizes are in cqw so the whole face
      scales with the box. */
@@ -569,14 +634,13 @@ const BANK_SCHEMA = [
     ],
   },
 ];
-const TOTALS_SCHEMA = TOTALS.map(([name]) => ({ name, selector: ENT }));
 const LABELS = {
   name: "Title",
   layout: "Layout",
   detail: "Pack details open",
   columns: "Max packs per row",
   box_min_width: "Min pack width",
-  highlight_soc: "Mark lowest / highest SOC",
+  highlight_soc: "Red / green border on lowest / highest SOC pack",
   show_legend: "Show colour legend",
   entity_soc: "Bank SOC",
   entity_voltage: "Bank voltage",
@@ -589,6 +653,9 @@ class BatteryStackedPackCardEditor extends HTMLElement {
   constructor() {
     super();
     this._tab = -1;   // -1 = Bank, otherwise a pack index
+    this._totRows = [];            // bank totals: entity-or-template fields
+    this._tplForced = new Set();   // switched to template mode but still empty
+    this._tplStash = {};           // templates set aside when switching back to an entity
   }
 
   setConfig(config) {
@@ -627,11 +694,10 @@ class BatteryStackedPackCardEditor extends HTMLElement {
       this._packEditor = null;
       this._packSlot.innerHTML = "";
       this._packEditorFor = -1;
-      for (const [form, schema] of [[this._bankForm, BANK_SCHEMA], [this._totalsForm, TOTALS_SCHEMA]]) {
-        form.hass = this._hass;
-        form.schema = schema;
-        form.data = { ...DEFAULTS, ...this._config };
-      }
+      this._bankForm.hass = this._hass;
+      this._bankForm.schema = BANK_SCHEMA;
+      this._bankForm.data = { ...DEFAULTS, ...this._config };
+      this._updateTotalRows();
       return;
     }
     const i = this._tab, packs = this._config.packs;
@@ -687,12 +753,22 @@ class BatteryStackedPackCardEditor extends HTMLElement {
         }
         .bspc-tools button:disabled { opacity: 0.4; cursor: default; }
         .bspc-tools button.danger { color: var(--error-color, #db4437); }
+        .bspc-form-totals { display: grid; gap: 8px; }
+        .bspc-ent { display: flex; align-items: center; gap: 6px; }
+        .bspc-ent ha-selector { flex: 1; min-width: 0; }
+        .bspc-tpl {
+          flex: none; font: 600 12px/1 ui-monospace, SFMono-Regular, Menlo, monospace; padding: 8px 7px;
+          border-radius: 6px; cursor: pointer; color: var(--secondary-text-color); background: none;
+          border: 1px solid var(--divider-color, rgba(0,0,0,0.15));
+        }
+        .bspc-tpl:hover { color: var(--primary-text-color); }
+        .bspc-tpl.on { color: var(--primary-color); border-color: var(--primary-color); }
       </style>
       <div class="bspc-tabs"></div>
       <div class="bspc-bank">
         <div class="bspc-form-bank"></div>
         <div class="bspc-title">Bank totals</div>
-        <div class="bspc-hint">Optional. Each one shows as a tile above the packs; leave a field empty to hide that tile.</div>
+        <div class="bspc-hint">Optional. Each one shows as a tile above the packs; leave a field empty to hide that tile. Use { } next to a field to enter a template instead of an entity, e.g. to add up several stacks.</div>
         <div class="bspc-form-totals"></div>
       </div>
       <div class="bspc-pack">
@@ -717,7 +793,8 @@ class BatteryStackedPackCardEditor extends HTMLElement {
       return f;
     };
     this._bankForm = form(".bspc-form-bank");
-    this._totalsForm = form(".bspc-form-totals");
+    const totals = this.querySelector(".bspc-form-totals");
+    for (const [name] of TOTALS) totals.appendChild(this._totalRow(name));
 
     this._tabs.addEventListener("click", (e) => {
       const t = e.target.closest(".bspc-tab");
@@ -742,6 +819,69 @@ class BatteryStackedPackCardEditor extends HTMLElement {
       if (act === "dup") { packs.splice(i + 1, 0, { ...packs[i], name: `${packs[i].name || `Pack ${i + 1}`} copy` }); this._setPacks(packs, i + 1); }
       if (act === "remove") { packs.splice(i, 1); this._packEditorFor = -1; this._setPacks(packs, Math.min(i, packs.length - 1)); }
     });
+  }
+
+  // Bank totals: an entity picker, or (after { }) a template editor, as in
+  // the pack card's editor.
+  _totalRow(name) {
+    const row = document.createElement("div");
+    row.className = "bspc-ent";
+    const sel = document.createElement("ha-selector");
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "bspc-tpl";
+    btn.textContent = "{ }";
+    row.append(sel, btn);
+    const rec = { name, sel, btn, mode: null };
+    sel.addEventListener("value-changed", (ev) => { ev.stopPropagation(); this._setField(name, ev.detail.value); });
+    btn.addEventListener("click", () => this._toggleTemplate(name));
+    this._totRows.push(rec);
+    return row;
+  }
+
+  _isTemplateMode(name) {
+    return isTpl(this._config[name]) || this._tplForced.has(name);
+  }
+
+  _setField(name, value) {
+    const cfg = { ...this._config };
+    if (value === undefined || value === null || value === "") delete cfg[name];
+    else cfg[name] = value;
+    this._dispatch(cfg);
+    this._updateTotalRows();
+  }
+
+  _toggleTemplate(name) {
+    const cur = this._config[name];
+    if (this._isTemplateMode(name)) {
+      // Back to an entity: a plain {{ states('x') }} becomes x again; anything
+      // richer is set aside for this session in case the click was a mistake.
+      this._tplForced.delete(name);
+      const m = typeof cur === "string" && /^\s*\{\{\s*states\(\s*['"]([\w.]+)['"]\s*\)\s*\}\}\s*$/.exec(cur);
+      if (cur && !m) this._tplStash[name] = cur;
+      this._setField(name, m ? m[1] : undefined);
+    } else {
+      this._tplForced.add(name);
+      const next = this._tplStash[name] || (typeof cur === "string" && cur ? `{{ states('${cur}') }}` : undefined);
+      if (next !== undefined && next !== cur) this._setField(name, next);
+      else this._updateTotalRows();
+    }
+  }
+
+  _updateTotalRows() {
+    for (const r of this._totRows) {
+      const tpl = this._isTemplateMode(r.name);
+      r.sel.hass = this._hass;
+      if (r.mode !== tpl) {   // only swap the inner selector when the mode flips
+        r.mode = tpl;
+        r.sel.selector = tpl ? { template: {} } : ENT;
+        r.btn.classList.toggle("on", tpl);
+        r.btn.setAttribute("aria-pressed", String(tpl));
+        r.btn.title = tpl ? "Use an entity instead" : "Use a template instead of an entity";
+      }
+      r.sel.label = LABELS[r.name] || r.name;
+      r.sel.value = this._config[r.name] ?? (tpl ? "" : undefined);
+    }
   }
 
   _renderTabs() {

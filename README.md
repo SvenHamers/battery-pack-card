@@ -281,17 +281,26 @@ Each pack's screen shows its SOC (with a bar), voltage, current, cell Δ and its
 | `pack_defaults`             | map     | —              | Options shared by every pack; a pack's own options win. |
 | `layout`                    | string  | `grid`         | `grid`: a cabinet with up to `columns` packs per row. `stack`: one column, packs on top of each other. |
 | `columns`                   | integer | `4`            | Most packs per row; rows hold fewer when a pack would get narrower than `box_min_width`. |
-| `box_min_width`             | integer | `130`          | Narrowest a pack is drawn, in px. |
+| `box_min_width`             | integer | `130`          | Narrowest a pack is drawn, in px. With `layout: stack` this is the width of the column (at least 220 px). |
 | `detail`                    | string  | `inline`       | `inline`: the pack card opens under the tapped pack's row. `popup`: in a dialog with Prev / Next. |
-| `highlight_soc`             | bool    | `true`         | Border on the lowest (red) and highest (green) SOC pack. |
+| `highlight_soc`             | bool    | `true`         | Red border on the lowest and green border on the highest SOC pack. `false` turns both off. In the editor: *Red / green border on lowest / highest SOC pack*. |
 | `show_legend`               | bool    | `true`         | Colour legend under the cabinet. |
-| `entity_soc`                | entity  | —              | Bank SOC tile. |
-| `entity_voltage`            | entity  | —              | Bank voltage tile. |
-| `entity_current`            | entity  | —              | Bank current tile. |
-| `entity_power`              | entity  | —              | Bank power tile. |
-| `entity_capacity_remaining` | entity  | —              | Bank remaining capacity tile. |
+| `entity_soc`                | entity or template | — | Bank SOC tile. |
+| `entity_voltage`            | entity or template | — | Bank voltage tile. |
+| `entity_current`            | entity or template | — | Bank current tile. |
+| `entity_power`              | entity or template | — | Bank power tile. |
+| `entity_capacity_remaining` | entity or template | — | Bank remaining capacity tile. |
 
-The bank tiles only show for the entities you set; with none set there is no tile row. The alarm badge in the header only shows when at least one pack has an alarm entity.
+The bank tiles only show for the settings you fill in; with none set there is no tile row. Each one takes an entity or, like every entity setting of the pack card, a [template](#templates-instead-of-entities) (press **{ }** next to the field in the editor). That way a stack can show its own totals, for example the remaining capacity of just the three packs on one shelf:
+
+```yaml
+entity_capacity_remaining: >-
+  {{ (states('sensor.shelf_pack_1_capacity_remaining') | float(0)
+    + states('sensor.shelf_pack_2_capacity_remaining') | float(0)
+    + states('sensor.shelf_pack_3_capacity_remaining') | float(0)) | round(0) }}
+```
+
+A template that returns a plain number gets the tile's unit and decimals (`%`, `V`, `A`, `W`, `Ah`); anything else, such as `1,234 Ah`, is shown as it is. Clicking the tile opens the first entity the template reads. The alarm badge in the header only shows when at least one pack has an alarm entity.
 
 If the card says an older Battery Pack Card is loaded, the browser loads a second copy of `battery-pack-card.js` (an old `/local/…` resource, or one bundled with an integration) that registered first. Remove it so only the HACS copy loads, then reload.
 
