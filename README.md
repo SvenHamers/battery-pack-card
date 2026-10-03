@@ -99,7 +99,7 @@ cell_voltage_pattern: "{{ states('sensor.pack_cell_{nn}') | float(0) / 1000 }}"
 | `entity_soh`                 | `sensor.X_soh_pourcentage`                   | State of health (%).         |
 | `entity_pack_voltage`        | `sensor.X_tension_totale_volt`               | Pack voltage (V).            |
 | `entity_current`             | `sensor.X_courant_total`                     | Pack current (A).            |
-| `entity_power`               | `sensor.X_puissance_totale`                  | Pack power (W).              |
+| `entity_power`               | `sensor.X_puissance_totale`                  | Pack power (W or kW).        |
 | `entity_balance_current`     | `sensor.X_balance_courant`                   | Balance current (A).         |
 | `entity_cycles`              | `sensor.X_nombre_cycle`                      | Cycle count.                 |
 | `entity_capacity_remaining`  | `sensor.X_capacite_restante_ah`              | Remaining capacity (Ah).     |
@@ -285,13 +285,16 @@ Each pack's screen shows its SOC (with a bar), voltage, current, cell Δ and its
 | `detail`                    | string  | `inline`       | `inline`: the pack card opens under the tapped pack's row. `popup`: in a dialog with Prev / Next. |
 | `highlight_soc`             | bool    | `true`         | Red border on the lowest and green border on the highest SOC pack. `false` turns both off. In the editor: *Red / green border on lowest / highest SOC pack*. |
 | `show_legend`               | bool    | `true`         | Colour legend under the cabinet. |
-| `entity_soc`                | entity or template | — | Bank SOC, big on the bank unit with a bar under it. |
-| `entity_voltage`            | entity or template | — | Bank voltage. |
-| `entity_current`            | entity or template | — | Bank current; its sign also sets ▲ CHARGING / ▼ DISCHARGING / IDLE. |
-| `entity_power`              | entity or template | — | Bank power (sets the direction when there is no current). |
-| `entity_capacity_remaining` | entity or template | — | Bank remaining capacity. |
+| `show_bank_display`         | bool    | `true`         | The bank display on top of the cabinet. |
+| `entity_soc`                | entity or template | — | Bank SOC, in the ring. Blank: worked out from the packs. |
+| `entity_voltage`            | entity or template | — | Bank voltage (Vtg). Blank: the packs' mean. |
+| `entity_current`            | entity or template | — | Bank current (Cur). Blank: the packs' sum. |
+| `entity_power`              | entity or template | — | Bank power, in W or kW (Pwr). Blank: voltage × current. |
+| `entity_capacity_remaining` | entity or template | — | Bank remaining capacity (Rem-Capacity). Blank: the packs' sum. |
 
-The bank totals show on a **bank unit**, the top device in the cabinet, like the master BMS or inverter above the packs: RUN / ALM lights (ALM when any pack is in alarm) and a screen with the SOC, the direction and the other values. On a phone or in a single stack it's compact and scales with the cabinet; on a wider card it switches to full labels, and from about 600 px it's one slim row. Only the values you set are shown; with none set there is no bank unit.
+The bank totals show on a **bank display** built into the top of the cabinet, styled after the JK BMS screen: voltage and current on top, the SOC in a ring next to the bank's total and remaining capacity, and below that the highest and lowest cell, the warmest temperature, the power in kW, the alarm state, the number of packs and the charge / discharge switches.
+
+Everything you don't set is worked out from the packs where that adds up: voltage is the packs' mean (they're in parallel), current and capacities are their sums, SOC is weighted by capacity, cells and temperature are the extremes over all packs. Alarm is red when any pack is in alarm, and CHG / DCH show `ON`, `OFF`, or for example `7/8` when one pack has its switch off. The ring is green above 50 %, orange above 20 % and red below, like the packs' bars. Turn the display off with `show_bank_display: false`.
 
 Each total takes an entity or, like every entity setting of the pack card, a [template](#templates-instead-of-entities) (press **{ }** next to the field in the editor). That way a stack can show its own totals, for example the remaining capacity of just the three packs on one shelf:
 

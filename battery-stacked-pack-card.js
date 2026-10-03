@@ -18,7 +18,7 @@
  */
 
 (() => {
-const VERSION = "1.7.0-alpha.1";
+const VERSION = "1.7.0-alpha.2";
 if (customElements.get("battery-stacked-pack-card")) return;
 
 const DEFAULTS = {
@@ -29,8 +29,9 @@ const DEFAULTS = {
   detail: "inline",      // "inline" = opens under the pack's row, "popup" = dialog
   highlight_soc: true,   // red border on the lowest SOC pack, green on the highest
   show_legend: true,
-  // Bank totals, shown on the master unit at the top of the cabinet. Each is
-  // an entity or a template; the unit only shows when at least one is set.
+  show_bank_display: true,   // the JK-style display on top of the cabinet
+  // Bank totals for that display, each an entity or a template. Whatever is
+  // left blank is worked out from the packs where that makes sense.
   entity_soc: "",
   entity_voltage: "",
   entity_current: "",
@@ -41,7 +42,7 @@ const DEFAULTS = {
 };
 
 // [config key, label, short label, default unit, decimals, signed], in the
-// order the master unit lists them.
+// order of the TOTALS editor fields.
 const TOTALS = [
   ["entity_soc",                "SOC",       "SOC", "%",  0, false],
   ["entity_voltage",            "VOLTAGE",   "V",   "V",  2, false],
@@ -90,6 +91,14 @@ class TemplateSubs {
   }
 }
 const intOr = (v, d) => { const n = parseInt(v, 10); return Number.isFinite(n) && n > 0 ? n : d; };
+// The display's SOC ring: the SOC colour over most of the arc, fading into a
+// matching tail colour over the last 40 % of it; full is one solid colour.
+const RING = { green: ["#84fa5c", "#68c8cc"], orange: ["#ff9800", "#ffd54f"], red: ["#ef5350", "#b71c1c"] };
+const ringGradient = (soc) => {
+  const [c, tail] = soc > 50 ? RING.green : soc > 20 ? RING.orange : RING.red;
+  if (soc >= 99) return `conic-gradient(${c} 0 100%)`;
+  return `conic-gradient(${c} 0%, ${c} ${(soc * 0.6).toFixed(1)}%, ${tail} ${soc}%, #1c1c1c ${soc}% 100%)`;
+};
 const socColor = (s) => (s > 50 ? "var(--clr-green)" : s > 20 ? "var(--clr-orange)" : "var(--clr-red)");
 
 // Every pack's effective battery-pack-card config.
@@ -159,7 +168,7 @@ class BatteryStackedPackCard extends HTMLElement {
   getCardSize() {
     const n = (this._packCfgs || []).length;
     const cols = this._config && this._config.layout === "stack" ? 1 : intOr(this._config && this._config.columns, 4);
-    return 2 + Math.ceil(n / cols) * 3;
+    return 2 + Math.ceil(n / cols) * 3 + (this._config && this._config.show_bank_display !== false ? 3 : 0);
   }
 
   // One headless battery-pack-card per pack does the entity work; see
@@ -202,7 +211,7 @@ class BatteryStackedPackCard extends HTMLElement {
       <style>${CSS}</style>
       <ha-card>
         <div id="head"></div>
-        <div id="cab" class="cabinet"></div>
+        <div id="rack"><div id="disp" class="mounted" hidden></div><div id="cab" class="cabinet"></div></div>
         <div id="legend"></div>
       </ha-card>
       <dialog id="dlg">
@@ -219,6 +228,12 @@ class BatteryStackedPackCard extends HTMLElement {
     this._head = r.getElementById("head");
     this._cab = r.getElementById("cab");
     this._legend = r.getElementById("legend");
+    this._rack = r.getElementById("rack");
+    this._disp = r.getElementById("disp");
+    this._disp.addEventListener("click", (e) => {
+      const t = e.composedPath().find((n) => n.dataset && n.dataset.entity);
+      if (t) this._moreInfo(t.dataset.entity);
+    });
     this._dlg = r.getElementById("dlg");
 
     this._head.addEventListener("click", (e) => {
@@ -228,11 +243,7 @@ class BatteryStackedPackCard extends HTMLElement {
     this._cab.addEventListener("click", (e) => {
       const path = e.composedPath();
       const box = path.find((n) => n.classList && n.classList.contains("box"));
-      if (!box) {
-        const t = path.find((n) => n.dataset && n.dataset.entity);   // a value on the master unit
-        if (t && this._master.contains(t)) this._moreInfo(t.dataset.entity);
-        return;
-      }
+      if (!box) return;
       const i = Number(box.dataset.i);
       if (this._config.detail === "popup") this._showPopup(i);
       else this._toggleInline(i);
@@ -267,16 +278,16 @@ class BatteryStackedPackCard extends HTMLElement {
     this._dropDetail();
     const c = this._config;
     this._cab.className = `cabinet${c.layout === "stack" ? " single" : ""}`;
-    this._cab.style.setProperty("--max-cols", c.layout === "stack" ? 1 : intOr(c.columns, 4));
-    this._cab.style.setProperty("--box-min", `${intOr(c.box_min_width, 130)}px`);
-    this._cab.innerHTML = `<div class="master" hidden></div>` + this._packCfgs.map((p, i) =>
+    this._rack.className = c.layout === "stack" ? "single" : "";
+    this._rack.style.setProperty("--max-cols", c.layout === "stack" ? 1 : intOr(c.columns, 4));
+    this._rack.style.setProperty("--box-min", `${intOr(c.box_min_width, 130)}px`);
+    this._cab.innerHTML = this._packCfgs.map((p, i) =>
       `<button type="button" class="box" data-i="${i}" style="order:${i * 2}" aria-expanded="false" title="${esc(p.name)}"></button>`,
     ).join("") + `<div class="bdetail"><div></div></div>`;
     this._boxes = [...this._cab.querySelectorAll(".box")];
     this._boxHtml = [];
     this._detail = this._cab.querySelector(".bdetail");
-    this._master = this._cab.querySelector(".master");
-    this._headHtml = this._legendHtml = this._masterHtml = null;
+    this._headHtml = this._legendHtml = this._dispHtml = null;
     if (this.isConnected) this.connectedCallback();
   }
 
@@ -309,11 +320,12 @@ class BatteryStackedPackCard extends HTMLElement {
 
     const head = this._renderHead(sums);
     if (head !== this._headHtml) { this._headHtml = head; this._head.innerHTML = head; }
-    const master = this._renderMaster(sums);
-    if (master !== this._masterHtml) {
-      this._masterHtml = master;
-      this._master.innerHTML = master;
-      this._master.hidden = !master;
+    const disp = this._incompatible ? "" : this._renderDisplay(sums);
+    if (disp !== this._dispHtml) {
+      this._dispHtml = disp;
+      this._disp.innerHTML = disp;
+      this._disp.hidden = !disp;
+      this._rack.classList.toggle("has-disp", !!disp);
     }
     const legend = c.show_legend !== false ? this._renderLegend(sums, minI >= 0) : "";
     if (legend !== this._legendHtml) { this._legendHtml = legend; this._legend.innerHTML = legend; }
@@ -371,47 +383,80 @@ class BatteryStackedPackCard extends HTMLElement {
       ${this._packCfgs.length ? "" : `<div class="empty">No packs yet. Add them in the card editor, or under <code>packs:</code> in YAML.</div>`}`;
   }
 
-  // The master unit: the bank totals as the top device in the cabinet, like
-  // the master BMS or inverter above the packs. Empty without any total set.
-  _renderMaster(sums) {
-    const c = this._config, st = (this._hass && this._hass.states) || {};
+  // The bank display: a JK BMS-style screen in a bezel on top of the cabinet.
+  // Each value comes from its bank setting (entity or template) when set,
+  // otherwise from the packs where that adds up: voltage = the packs' mean
+  // (they're in parallel), current and capacities = their sum, SOC = weighted
+  // by capacity, cells / temperature = the extremes over all packs.
+  _renderDisplay(sums) {
+    const c = this._config;
+    if (c.show_bank_display === false) return "";
+    const st = (this._hass && this._hass.states) || {};
+    const packs = sums.filter(Boolean);
     const T = {};
-    for (const [key, label, short, unit, dec, signed] of TOTALS) {
+    for (const [key] of TOTALS) {
       const t = this._total(c[key], st);
-      if (t) T[key] = { ...t, n: t.text === null ? parseFloat(t.value) : NaN, label, short, unit: t.unit || unit, dec, signed };
+      if (!t) continue;
+      let n = t.text === null ? parseFloat(t.value) : NaN;
+      if (key === "entity_power" && Number.isFinite(n)) n *= /^kW$/i.test(t.unit || "") ? 1000 : /^MW$/i.test(t.unit || "") ? 1e6 : 1;
+      T[key] = { ...t, n };
     }
-    if (!Object.keys(T).length) return "";
-    const num = (t) => (t && Number.isFinite(t.n) ? t.n : null);
-    const show = (t) => (t.text !== null ? esc(t.text) : fmt(Number.isFinite(t.n) ? t.n : NaN, t.dec, t.signed));
-    const attrs = (t) => `${t.entity ? ` data-entity="${esc(t.entity)}" role="button"` : ""}${t.error ? ` title="${esc(t.error)}"` : ""}`;
+    if (!packs.length && !Object.keys(T).length) return "";
+    const vals = (k) => packs.map((p) => p[k]).filter(fin);
+    const sum = (k) => { const v = vals(k); return v.length ? v.reduce((a, b) => a + b, 0) : null; };
+    const mean = (k) => { const v = vals(k); return v.length ? v.reduce((a, b) => a + b, 0) / v.length : null; };
+    const pick = (key, derived) => (T[key] ? T[key] : derived !== null && derived !== undefined && Number.isFinite(derived) ? { n: derived, text: null } : null);
 
-    // Direction from the bank current, as the pack card does; power only
-    // when there is no current.
-    const cur = num(T.entity_current), pow = num(T.entity_power);
-    const dir = cur !== null ? (cur > 0.1 ? 1 : cur < -0.1 ? -1 : 0)
-              : pow !== null ? (pow > 1 ? 1 : pow < -1 ? -1 : 0) : null;
-    const dirHtml = dir === null ? "" : `<span class="lcd-dir ${dir > 0 ? "chg" : dir < 0 ? "dis" : "idle"}">
-        <span class="d">${dir > 0 ? "▲ CHARGING" : dir < 0 ? "▼ DISCHARGING" : "IDLE"}</span>
-        ${pow !== null && dir !== 0 ? `<span class="w">${fmt(Math.abs(pow), 0)} W</span>` : ""}</span>`;
+    const capTot = sum("capacityTotal"), capRemSum = sum("capacityRemaining");
+    const V = pick("entity_voltage", mean("voltage"));
+    const A = pick("entity_current", sum("current"));
+    const socDerived = capTot && capRemSum !== null ? (capRemSum / capTot) * 100 : mean("soc");
+    const SOC = pick("entity_soc", socDerived);
+    const REM = pick("entity_capacity_remaining", capRemSum);
+    const vxa = V && A && Number.isFinite(V.n) && Number.isFinite(A.n) && V.text === null && A.text === null ? V.n * A.n : null;
+    const PWR = pick("entity_power", vxa !== null ? vxa : sum("power"));
+    const cellMax = vals("cellMax").length ? Math.max(...vals("cellMax")) : null;
+    const cellMin = vals("cellMin").length ? Math.min(...vals("cellMin")) : null;
+    const temps = packs.map((p) => p.temp && p.temp.shown).filter(fin);
+    const temp = temps.length ? Math.max(...temps) : null;
+    const watched = packs.filter((p) => p.alarm !== null);
+    const alarms = watched.filter((p) => p.alarm).length;
+    const sw = (k) => {
+      const known = packs.filter((p) => p[k] !== null);
+      if (!known.length) return null;
+      const on = known.filter((p) => p[k]).length;
+      return on === known.length ? ["ON", ""] : on === 0 ? ["OFF", "red"] : [`${on}/${known.length}`, "amber"];
+    };
+    const chg = sw("charge"), dch = sw("discharge");
 
-    const soc = T.entity_soc, socN = num(soc);
-    const vals = TOTALS.slice(1).map(([key]) => T[key]).filter(Boolean);
-    const alarms = sums.filter((s) => s && s.alarm).length;
-    const running = sums.some((s) => s && (s.charge || s.discharge || (s.charge === null && s.discharge === null)));
-    const n = this._packCfgs.length;
-    return `
-      <div class="brand">
-        <span>BANK · ${n} PACK${n === 1 ? "" : "S"}</span>
-        <span class="leds"><span><i class="run${running ? " on" : ""}"></i>RUN</span><span><i class="alm${alarms ? " on" : ""}"></i>ALM</span></span>
-      </div>
-      <div class="lcd">
-        ${soc ? `<span class="lcd-soc"${attrs(soc)}>${soc.text !== null ? esc(soc.text) : `${fmt(socN === null ? NaN : socN, 0)}<small>%</small>`}</span>` : ""}
-        ${dirHtml}
-        ${socN !== null ? `<div class="lcd-bar"><i style="width:${Math.max(0, Math.min(100, socN))}%;--sc:${socColor(socN)}"></i></div>` : ""}
-        ${vals.length ? `<div class="lcd-vals" style="--cols-n:repeat(${Math.min(2, vals.length)}, 1fr);--cols-w:repeat(${vals.length}, auto)">
-          ${vals.map((t) => `<span${attrs(t)}><span class="k"><span class="short">${t.short}</span><span class="full">${t.label}</span></span><span class="v">${show(t)}${t.text === null ? `<span class="u">${esc(t.unit)}</span>` : ""}</span></span>`).join("")}
-        </div>` : ""}
-      </div>`;
+    const attrs = (t) => `${t && t.entity ? ` data-entity="${esc(t.entity)}" role="button"` : ""}${t && t.error ? ` title="${esc(t.error)}"` : ""}`;
+    const show = (t, d, unit, scale = 1) => (t.text !== null ? esc(t.text) : `${fmt(Number.isFinite(t.n) ? t.n / scale : NaN, d)}${unit}`);
+    const item = (label, html, t, cls = "") => (html === null ? "" : `<span${attrs(t)}>${label}<span class="v ${cls}">${html}</span></span>`);
+
+    const socN = SOC && SOC.text === null && Number.isFinite(SOC.n) ? Math.max(0, Math.min(100, SOC.n)) : null;
+    const top = [
+      V ? `<span${attrs(V)}><span class="ico">V</span>Vtg.: <span class="v big">${show(V, 2, "V")}</span></span>` : "",
+      A ? `<span${attrs(A)}><span class="ico">A</span>Cur.: <span class="v big">${show(A, 1, "A")}</span></span>` : "",
+    ].join("");
+    const capDec = (n) => (Math.abs(n) >= 100 ? 0 : 1);
+    const mid = [
+      SOC ? `<div class="ring"${attrs(SOC)}><span class="arc" style="background:${socN === null ? "#1c1c1c" : ringGradient(socN)}"></span><span class="pct">${SOC.text !== null ? esc(SOC.text) : `${fmt(socN === null ? NaN : socN, 0)}%`}</span></div>` : "",
+      capTot !== null ? `<div class="cap"><span class="v">${fmt(capTot, capDec(capTot))}</span><span class="k">Bat-Capacity(Ah)</span></div>` : "",
+      REM ? `<div class="cap"${attrs(REM)}><span class="v">${REM.text !== null ? esc(REM.text) : fmt(REM.n, capDec(REM.n || 0))}</span><span class="k">Rem-Capacity(Ah)</span></div>` : "",
+    ].join("");
+    const col = (a, b) => (a || b ? `<div class="col">${a}${b}</div>` : "");
+    const bot = [
+      col(item("Max.Cell:", cellMax === null ? null : `${fmt(cellMax, 3)}V`), item("Min.Cell:", cellMin === null ? null : `${fmt(cellMin, 3)}V`)),
+      col(item("Temp:", temp === null ? null : `${fmt(temp, 0)}°`), PWR ? item("Pwr(kW):", show(PWR, 2, "", 1000), PWR) : ""),
+      col(watched.length ? item("Alarm:", alarms ? "Alarm" : "Normal", null, alarms ? "red" : "") : "", item("Packs:", String(this._packCfgs.length))),
+      col(chg ? item("CHG:", chg[0], null, chg[1]) : "", dch ? item("DCH:", dch[0], null, dch[1]) : ""),
+    ].filter(Boolean);
+    if (!top && !mid && !bot.length) return "";
+    return `<div class="jk">
+      ${top ? `<div class="top">${top}</div>` : ""}
+      ${mid ? `<div class="mid">${mid}</div>` : ""}
+      ${bot.length ? `<div class="bot" style="--cols:${bot.length}">${bot.join("")}</div>` : ""}
+    </div>`;
   }
 
   // One bank total: an entity's state, or a template's rendered result. A
@@ -546,7 +591,7 @@ const CSS = `
   .cabinet:empty { display: none; }
   /* One column, as wide as box_min_width but never narrower than 220px; the
      cabinet grows with it, so the packs stay inside it and centred. */
-  .cabinet.single { --gap: 3px; max-width: max(220px, var(--box-min, 130px)); margin: 0 auto; }
+  .cabinet.single { --gap: 3px; }
 
   /* One pack: the front of its case. Sizes are in cqw so the whole face
      scales with the box. */
@@ -621,66 +666,57 @@ const CSS = `
   .ports i.dry { background: #3d9a4a; border-color: #2c6e35; }
   @container (max-width: 115px) { .scr-line, .ports { display: none; } }
 
-  /* The master unit: bank totals as the top device in the cabinet. Up to
-     380px it scales with its width like the packs; wider it switches to
-     fixed sizes, and from 600px to a single row. */
-  .master {
-    order: -1; grid-column: 1 / -1; position: relative; container-type: inline-size; color: #fff;
-    border-radius: 5px; padding: 7% 6% 6%; margin-bottom: 2px;
-    background: linear-gradient(170deg, #303030 0%, #212121 45%, #1a1a1a 100%);
-    border: 1px solid rgba(255,255,255,0.1);
-    box-shadow: inset 0 1px 0 rgba(255,255,255,0.12), 0 3px 6px rgba(0,0,0,0.5);
+  /* The rack: the display bezel on top of the cabinet, both the same width.
+     In single stack it's as wide as one pack plus the cabinet's padding. */
+  #rack.single { max-width: calc(max(220px, var(--box-min, 130px)) + 30px); margin: 0 auto; }
+  .mounted { position: relative; padding: 9px 9px 10px; border-radius: 10px 10px 0 0; border: 1px solid rgba(255,255,255,0.08); border-bottom: 0;
+    background: linear-gradient(#262626, #1a1a1a); }
+  .mounted[hidden] { display: none; }
+  .mounted::before, .mounted::after { content: ""; position: absolute; top: 4px; width: 4px; height: 4px; border-radius: 50%; background: radial-gradient(circle at 35% 35%, #bbb, #555); }
+  .mounted::before { left: 4px; } .mounted::after { right: 4px; }
+  #rack.has-disp .cabinet { border-radius: 0 0 10px 10px; }
+
+  /* The display itself, after the JK BMS screen: black, white labels, light
+     green figures (sampled from the JK screen), the SOC ring. */
+  .jk {
+    container-type: inline-size; color: #fff; background: #070707; border-radius: 3px; padding: 12px 14px;
+    box-shadow: inset 0 0 0 2px #000, 0 0 0 1px rgba(255,255,255,0.06);
+    font-family: "Roboto Condensed", "Arial Narrow", var(--paper-font-body1_-_font-family, system-ui), sans-serif; font-stretch: condensed;
   }
-  .master[hidden] { display: none; }
-  .master .brand { display: flex; justify-content: space-between; align-items: center; font-size: 5.4cqw; font-weight: 700; letter-spacing: 0.12em; color: rgba(255,255,255,0.5); margin-bottom: 4%; }
-  .master .leds { gap: 4cqw; }
-  .master .leds i { width: 3cqw; }
-  .lcd {
-    border-radius: 4px; padding: 5% 6%; --tint: rgba(76,175,80,0.20);
-    background: linear-gradient(var(--tint), var(--tint)), #0b0d0b; border: 1.5px solid #050505;
-    box-shadow: inset 0 0 0 1px rgba(255,255,255,0.06), inset 0 10px 18px rgba(255,255,255,0.04);
-    font-variant-numeric: tabular-nums;
-    display: grid; grid-template-columns: 1fr auto; grid-template-areas: "soc dir" "bar bar" "vals vals"; align-items: end;
-  }
-  .lcd-soc { grid-area: soc; font-size: 17cqw; font-weight: 700; line-height: 1; }
-  .lcd-soc small { font-size: 0.55em; opacity: 0.8; }
-  .lcd-dir { grid-area: dir; text-align: right; font-size: 5.4cqw; font-weight: 700; letter-spacing: 0.08em; line-height: 1.3; }
-  .lcd-dir .d { white-space: nowrap; }
-  .lcd-dir .w { display: block; color: #fff; opacity: 0.85; }
-  .lcd-dir.chg { color: var(--clr-green); }
-  .lcd-dir.dis { color: var(--clr-orange); }
-  .lcd-dir.idle { color: var(--clr-grey); }
-  .lcd-bar { grid-area: bar; height: 4px; border-radius: 2px; background: rgba(0,0,0,0.5); margin: 5% 0; overflow: hidden; }
-  .lcd-bar i { display: block; height: 100%; background: var(--sc); box-shadow: 0 0 6px var(--sc); }
-  .lcd-vals { grid-area: vals; display: grid; grid-template-columns: var(--cols-n); gap: 3% 6%; font-size: 6.4cqw; }
-  .lcd-vals > span { display: flex; justify-content: space-between; gap: 4px; white-space: nowrap; }
-  .lcd-vals .k { opacity: 0.5; font-size: 0.85em; letter-spacing: 0.06em; }
-  .lcd-vals .k .full, .lcd-vals .u { display: none; }
-  .lcd [data-entity] { cursor: pointer; }
-  @container (min-width: 380px) {
-    .master { padding: 12px 16px 14px; }
-    .master .brand { font-size: 11px; margin-bottom: 9px; }
-    .master .leds { gap: 14px; }
-    .master .leds span { gap: 5px; }
-    .master .leds i { width: 7px; }
-    .lcd { padding: 12px 18px; grid-template-areas: "soc dir" "vals vals" "bar bar"; row-gap: 10px; align-items: center; }
-    .lcd-soc { font-size: 44px; }
-    .lcd-dir { font-size: 11px; }
-    .lcd-dir .w { display: none; }   /* power is among the values */
-    .lcd-bar { height: 5px; margin: 0; }
-    .lcd-vals { grid-template-columns: var(--cols-w); justify-content: space-between; gap: 0 14px; font-size: 18px; font-weight: 600; }
-    .lcd-vals > span { flex-direction: column; align-items: flex-start; gap: 0; }
-    .lcd-vals .k { font-size: 10px; font-weight: 500; letter-spacing: 1.4px; margin-bottom: 2px; }
-    .lcd-vals .k .full { display: inline; }
-    .lcd-vals .k .short { display: none; }
-    .lcd-vals .u { display: inline; font-size: 0.6em; opacity: 0.55; margin-left: 2px; font-weight: 500; }
-  }
-  @container (min-width: 600px) {
-    .lcd { grid-template-columns: auto 1fr; grid-template-areas: "soc vals" "dir vals" "bar bar"; column-gap: 34px; row-gap: 4px; }
-    .lcd-soc { font-size: 48px; }
-    .lcd-dir { text-align: left; }
-    .lcd-vals { justify-content: space-evenly; font-size: 21px; }
-    .lcd-bar { margin-top: 8px; }
+  .jk .v { color: #84fa5c; font-weight: 700; font-variant-numeric: tabular-nums; margin-left: 3px; }
+  .jk .v.red { color: #ff3b30; } .jk .v.amber { color: var(--clr-amber); }
+  .jk [data-entity] { cursor: pointer; }
+  .jk .top { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  .jk .top > span { display: flex; align-items: center; gap: 6px; white-space: nowrap; font-size: 15px; }
+  .jk .top .v.big { font-size: 26px; line-height: 1; margin-left: 0; }
+  .jk .ico { display: inline-grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; border: 1.5px solid #84fa5c; color: #84fa5c; font-size: 11px; font-weight: 700; flex: none; }
+  .jk .mid { display: grid; grid-template-columns: auto 1fr 1fr; align-items: center; gap: 10px; margin: 10px 0 8px; }
+  .jk .ring { position: relative; width: 92px; height: 92px; }
+  .jk .ring .arc { position: absolute; inset: 0; border-radius: 50%;
+    -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 15px), #000 calc(100% - 14.5px));
+            mask: radial-gradient(farthest-side, transparent calc(100% - 15px), #000 calc(100% - 14.5px)); }
+  .jk .ring .pct { position: absolute; inset: 15px; border-radius: 50%; display: grid; place-items: center; font-size: 20px; font-weight: 700; background: #0c0c0c; box-shadow: 0 0 0 1px #2a2a2a; }
+  .jk .cap { text-align: center; }
+  .jk .cap .v { display: block; font-size: 34px; line-height: 1; margin: 0; }
+  .jk .cap .k { font-size: 10.5px; font-weight: 600; white-space: nowrap; }
+  .jk .bot { display: grid; grid-template-columns: repeat(var(--cols, 4), auto); justify-content: space-between; gap: 4px 12px; font-size: 13px; white-space: nowrap; }
+  .jk .bot .col { display: flex; flex-direction: column; gap: 4px; }
+  .jk .bot .v { font-size: 15px; }
+  @container (max-width: 380px) {
+    .jk { padding: 10px 11px; }
+    .jk .top > span { font-size: 12px; gap: 4px; }
+    .jk .top .v.big { font-size: 20px; }
+    .jk .ico { width: 16px; height: 16px; font-size: 9px; }
+    .jk .mid { gap: 6px; margin: 8px 0 6px; }
+    .jk .ring { width: 74px; height: 74px; }
+    .jk .ring .pct { font-size: 16px; inset: 12px; }
+    .jk .ring .arc { -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 12px), #000 calc(100% - 11.5px));
+                             mask: radial-gradient(farthest-side, transparent calc(100% - 12px), #000 calc(100% - 11.5px)); }
+    .jk .cap .v { font-size: 27px; }
+    .jk .cap .k { font-size: 9px; }
+    .jk .bot { grid-template-columns: repeat(2, auto); font-size: 11.5px; gap: 6px 10px; }
+    .jk .bot .col { gap: 3px; }
+    .jk .bot .v { font-size: 13px; }
   }
 
   /* Inline detail: a full-width grid row under the tapped box's row. */
@@ -735,6 +771,7 @@ const BANK_SCHEMA = [
       { name: "box_min_width", selector: { number: { min: 90, max: 320, step: 5, mode: "box", unit_of_measurement: "px" } } },
       { name: "highlight_soc", selector: { boolean: {} } },
       { name: "show_legend", selector: { boolean: {} } },
+      { name: "show_bank_display", selector: { boolean: {} } },
     ],
   },
 ];
@@ -746,6 +783,7 @@ const LABELS = {
   box_min_width: "Min pack width",
   highlight_soc: "Red / green border on lowest / highest SOC pack",
   show_legend: "Show colour legend",
+  show_bank_display: "Show the bank display",
   entity_soc: "Bank SOC",
   entity_voltage: "Bank voltage",
   entity_current: "Bank current",
@@ -872,7 +910,7 @@ class BatteryStackedPackCardEditor extends HTMLElement {
       <div class="bspc-bank">
         <div class="bspc-form-bank"></div>
         <div class="bspc-title">Bank totals</div>
-        <div class="bspc-hint">Optional. These show on the bank unit at the top of the cabinet; leave a field empty to leave that value off, or all of them to hide the unit. Use { } next to a field to enter a template instead of an entity, e.g. to add up several stacks.</div>
+        <div class="bspc-hint">Optional, for the bank display on top of the cabinet. A field left empty is worked out from the packs where possible (voltage, current, SOC, power, remaining capacity). Use { } next to a field to enter a template instead of an entity, e.g. to add up several stacks.</div>
         <div class="bspc-form-totals"></div>
       </div>
       <div class="bspc-pack">

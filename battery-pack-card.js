@@ -15,7 +15,7 @@
  * Click any element to open the matching entity's more-info dialog.
  */
 
-const VERSION = "1.7.0-alpha.1";
+const VERSION = "1.7.0-alpha.2";
 
 const DEFAULTS = {
   name: "",
@@ -1033,20 +1033,21 @@ class BatteryPackCard extends HTMLElement {
     const val = (eid) => (this._exists(eid) ? this._raw(eid) : null);
     const has = (eid) => this._exists(eid);
 
-    let deltaMv = null;
+    let deltaMv = null, cellMin = null, cellMax = null;
     const sSc = this._voltScaleFor(
       [E.vMin, E.vAvg, E.vMax].map((e) => this._raw(e)),
       voltScale(orNull(cfg.summary_voltage_from) || cfg.cell_voltage_from), "Min/avg/max voltages",
     );
-    if (has(E.vDelta)) deltaMv = this._raw(E.vDelta) * sSc * 1000;
-    else if (has(E.vMin) && has(E.vMax)) deltaMv = (this._raw(E.vMax) - this._raw(E.vMin)) * sSc * 1000;
+    if (has(E.vMin) && has(E.vMax)) { cellMin = this._raw(E.vMin) * sSc; cellMax = this._raw(E.vMax) * sSc; }
     else {
       const raws = [];
       for (let n = 1; n <= cfg.cells; n++) raws.push(this._raw(this._cellEntity("v", n)));
       const vSc = this._voltScaleFor(raws, voltScale(cfg.cell_voltage_from), "Cell voltages");
       const v = raws.filter((x) => Number.isFinite(x) && x > 0).map((x) => x * vSc);
-      if (v.length > 1) deltaMv = (Math.max(...v) - Math.min(...v)) * 1000;
+      if (v.length) { cellMin = Math.min(...v); cellMax = Math.max(...v); }
     }
+    if (has(E.vDelta)) deltaMv = this._raw(E.vDelta) * sSc * 1000;
+    else if (Number.isFinite(cellMin) && Number.isFinite(cellMax)) deltaMv = (cellMax - cellMin) * 1000;
     const dBand = deltaBands(cfg);
     const deltaState = !Number.isFinite(deltaMv) ? "" : deltaMv >= dBand.bad ? "bad" : deltaMv >= dBand.warn ? "warn" : "ok";
 
@@ -1061,7 +1062,8 @@ class BatteryPackCard extends HTMLElement {
     return {
       name: cfg.name,
       soc: val(E.soc), soh: val(E.soh),
-      voltage: val(E.packV), current: val(E.curA), power: val(E.powW),
+      voltage: val(E.packV), current: val(E.curA), power: has(E.powW) ? this._watts(E.powW) : null,
+      cellMin, cellMax,
       capacityRemaining: val(E.capRem), capacityTotal: val(E.capTot),
       deltaMv, deltaState, temp,
       alarm: has(E.alarmB) ? this._on(E.alarmB) : null,
@@ -1095,6 +1097,15 @@ class BatteryPackCard extends HTMLElement {
   }
   _exists(eid){ return isTpl(eid) ? this._state(eid) !== undefined : !!(eid && this._hass?.states[eid]); }
   _num(eid)   { const v = parseFloat(this._state(eid)); return Number.isFinite(v) ? v : 0; }
+  // Power in W, whatever unit the entity reports it in (W, kW, MW): a
+  // 3.25 kW sensor read as a bare number showed as "3 W". A template's
+  // result has no unit and is taken as W.
+  _watts(eid) {
+    const v = parseFloat(this._state(eid));
+    if (!Number.isFinite(v)) return NaN;
+    const u = isTpl(eid) ? "" : String(this._hass?.states[eid]?.attributes?.unit_of_measurement || "").trim();
+    return /^kW$/i.test(u) ? v * 1000 : /^MW$/i.test(u) ? v * 1e6 : v;
+  }
   _on(eid)    { return /^(on|true)$/i.test(String(this._state(eid))); }
   _raw(eid)   { return parseFloat(this._state(eid)); }
 
@@ -1190,7 +1201,7 @@ class BatteryPackCard extends HTMLElement {
     const soh   = this._num(E.soh);
     const packV = this._num(E.packV);
     const curA  = this._num(E.curA);
-    const powW  = this._num(E.powW);
+    const powW  = Number.isFinite(this._watts(E.powW)) ? this._watts(E.powW) : 0;
     const balA  = this._num(E.balA);
     const cycles= this._state(E.cycles) || "0";
     const capRem= this._num(E.capRem);
