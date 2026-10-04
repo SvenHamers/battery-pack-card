@@ -16,6 +16,9 @@ Every region is clickable and opens the matching entity's more-info dialog.
 
 …the [**jean-luc1203/jkbms-rs485-addon**](https://github.com/jean-luc1203/jkbms-rs485-addon) integration. The Basic configuration only needs a `prefix:` and you're done — all sensors, binary sensors, cell entities, temperatures and the alarm signals are derived automatically from that prefix and match the addon's default entity naming.
 
+- **Pick your pack from a list.** The editor finds the add-on's packs in your Home Assistant and offers them in the prefix field (you can still type any prefix), and a new card starts with the first one, cell count included.
+- **Multi-Pack ready.** In the add-on's upcoming Multi-Pack mode the pack is part of the name (`pack_1_bms_1`, `pack_2_bms_1`, …); that's just another prefix, e.g. `prefix: pack_1_bms_1`. The alarm entities are found automatically whether they follow the classic `<prefix>_<prefix>` naming or a new one; existing setups keep working exactly as before.
+
 Using a different BMS? Use the **Advanced** tab to point each field at your own entities — every value on the card is independently overridable, including each individual cell.
 
 ## Install
@@ -63,7 +66,7 @@ If you use the JK-BMS RS485 addon, `prefix` is the only required field.
 | ------------------- | ------- | --------------------------- | ------------------------------------------------------------- |
 | `prefix`            | string  | —                           | Entity prefix (e.g. `bms_master`). Optional if every `entity_*` override below is set instead. |
 | `name`              | string  | `<prefix>`                  | Title shown in the card header.                               |
-| `alarm_prefix`      | string  | `<prefix>_<prefix>`         | Prefix for `*_alarm_status` / `*_alarm_active`.               |
+| `alarm_prefix`      | string  | `<prefix>_<prefix>`         | Prefix for `*_alarm_status` / `*_alarm_active`. Blank: `<prefix>_<prefix>` when that exists, otherwise the card looks for alarm entities belonging to the prefix (e.g. with the add-on's Multi-Pack naming). |
 | `cells`             | integer | `16`                        | Number of series cells to render (4–32).                      |
 | `show_battery`      | bool    | `true`                      | Show the SVG battery silhouette with SOC fill.                |
 | `show_stats`        | bool    | `true`                      | Show the stat tiles (voltage, current, power, balance, cycles, phase). Tiles whose sensor doesn't exist are hidden; without a power sensor, power is voltage × current. |
@@ -272,7 +275,7 @@ While editing:
 
 ![Battery Stacked Pack Card](docs/stacked-pack-card.jpg)
 
-It comes with the same HACS install, nothing extra to download: on a dashboard choose "Add card" and pick **Battery Stacked Pack Card**, next to the regular **Battery Pack Card**. The editor has a **Bank** tab for the options below and one tab per pack, holding the regular Battery Pack Card editor. **+ Add pack** starts from a copy of the last pack, so usually only the name and prefix need changing.
+It comes with the same HACS install, nothing extra to download: on a dashboard choose "Add card" and pick **Battery Stacked Pack Card**, next to the regular **Battery Pack Card**. The editor has a **Bank** tab for the options below and one tab per pack, holding the regular Battery Pack Card editor. **+ Add pack** starts from a copy of the last pack, so usually only the name and prefix need changing. With the JK-BMS RS485 add-on, a new stacked card starts with all its packs, and the Bank tab offers to add any you're missing in one go. With the add-on's Multi-Pack mode, one stacked card per `pack_N` with its BMSes as packs fits nicely.
 
 ```yaml
 type: custom:battery-stacked-pack-card

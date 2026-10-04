@@ -15,7 +15,7 @@
  * Click any element to open the matching entity's more-info dialog.
  */
 
-const VERSION = "1.8.0";
+const VERSION = "1.9.0-alpha.1";
 
 const DEFAULTS = {
   name: "",
@@ -498,18 +498,49 @@ const TPL_FILTERS = [
 // setups), so a reading's unit has to come from the entity, not be assumed.
 const isFahrenheit = (u) => /^\s*°?\s*F\s*$/i.test(String(u || "")) || u === "℉";
 
+// Packs of the JK-BMS RS485 add-on in this Home Assistant, found by their
+// SOC sensor: the classic naming ("bms_master", "bms_1") and Multi-Pack's
+// pack-aware one ("pack_1_bms_1") alike, in natural order.
+const findPrefixes = (hass) => {
+  const st = (hass && hass.states) || {};
+  return Object.keys(st)
+    .map((id) => /^sensor\.(.+)_soc_pourcentage$/.exec(id))
+    .filter(Boolean).map((m) => m[1])
+    .filter((p) => st[`sensor.${p}_tension_totale_volt`] || st[`sensor.${p}_cell_1_volt`])
+    .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+};
+// Number of cells a pack has, from its cell voltage sensors.
+const countCells = (hass, prefix) => {
+  const st = (hass && hass.states) || {};
+  let n = 0;
+  while (n < 32 && st[`sensor.${prefix}_cell_${n + 1}_volt`]) n++;
+  return n;
+};
+// "pack_1_bms_1" → "Pack 1 BMS 1", "bms_master" → "BMS master"
+const prefixName = (p) => String(p).split("_").filter(Boolean)
+  .map((w, i) => (/^bms$/i.test(w) ? "BMS" : i === 0 ? w.charAt(0).toUpperCase() + w.slice(1) : w)).join(" ");
+
 const lsGet = (k) => { try { return localStorage.getItem(k); } catch (e) { return null; } };
 const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch (e) { /* private mode etc. */ } };
 
 // ─── Main card ─────────────────────────────────────────────────────────────
 class BatteryPackCard extends HTMLElement {
-  static getStubConfig() {
+  static getStubConfig(hass) {
+    // Start from the first pack the JK-BMS add-on has in this Home Assistant
+    // (any naming); the alarm entities are then found by the card itself.
+    const p = findPrefixes(hass)[0];
+    if (p) return { prefix: p, name: prefixName(p), cells: countCells(hass, p) || 16 };
     return {
       prefix: "bms_master",
       name: "BMS Master",
       alarm_prefix: "bms_master_bms_master",
       cells: 16,
     };
+  }
+
+  // For the stacked card and the editors: every add-on pack in this HA.
+  static findPacks(hass) {
+    return findPrefixes(hass).map((p) => ({ prefix: p, name: prefixName(p), cells: countCells(hass, p) || 16 }));
   }
   static getConfigElement() {
     return document.createElement("battery-pack-card-editor");
@@ -519,9 +550,13 @@ class BatteryPackCard extends HTMLElement {
     if (!config) throw new Error("Configuration required");
     const merged = { ...DEFAULTS, ...config };
     if (!merged.name) merged.name = merged.prefix || "Battery";
+    // Without an alarm prefix the add-on's classic naming is assumed
+    // (bms_master → bms_master_bms_master); see _alarmBase for other naming.
+    this._alarmAuto = !!merged.prefix && !orNull(merged.alarm_prefix);
     if (merged.prefix && !merged.alarm_prefix) {
       merged.alarm_prefix = `${merged.prefix}_${merged.prefix}`;
     }
+    this._alarmFound = undefined;
     this._config = merged;
     if (!this._root) this._setup();
     this._syncInfo();
@@ -1211,10 +1246,35 @@ class BatteryPackCard extends HTMLElement {
     );
   }
 
+  // The alarm entities' prefix. Set in the config: used as is. Not set: the
+  // classic {prefix}_{prefix} when that exists, as always; only when it
+  // doesn't, look for alarm entities that belong to this prefix, so other
+  // naming (e.g. the add-on's Multi-Pack mode) works without configuring it.
+  // Searched at most every 30 s while nothing is found.
+  _alarmBase() {
+    const c = this._config, st = this._hass?.states;
+    if (!this._alarmAuto || !st) return c.alarm_prefix;
+    const has = (ap) => !!(st[`sensor.${ap}_alarm_status`] || st[`binary_sensor.${ap}_alarm_active`]);
+    if (has(c.alarm_prefix)) return c.alarm_prefix;
+    if (this._alarmFound && has(this._alarmFound)) return this._alarmFound;
+    const now = Date.now();
+    if (this._alarmFound === null && now - (this._alarmScan || 0) < 30000) return c.alarm_prefix;
+    this._alarmScan = now;
+    const p = c.prefix;
+    const ours = (ap) => ap === p || ap.startsWith(`${p}_`) || ap.endsWith(`_${p}`) || ap.includes(`_${p}_`);
+    const found = Object.keys(st)
+      .map((id) => /^(?:sensor\.(.+)_alarm_status|binary_sensor\.(.+)_alarm_active)$/.exec(id))
+      .filter(Boolean).map((m) => m[1] || m[2])
+      .filter(ours)
+      .sort((a, b) => a.length - b.length)[0];
+    this._alarmFound = found || null;
+    return found || c.alarm_prefix;
+  }
+
   _resolveEntities() {
     const c = this._config;
     const p = c.prefix;
-    const ap = c.alarm_prefix;
+    const ap = this._alarmBase();
     const def = (suf, dom = "sensor") => (p ? `${dom}.${p}_${suf}` : null);
     const adef = (suf, dom = "sensor") => (ap ? `${dom}.${ap}_${suf}` : null);
     return {
@@ -2005,6 +2065,20 @@ class BatteryPackCardEditor extends HTMLElement {
     this._cellForms = [vForm, rForm];
   }
 
+  // The prefix field offers the add-on packs found in this HA; typing any
+  // other prefix keeps working.
+  _basicSchema() {
+    const found = findPrefixes(this._hass);
+    const cur = this._config.prefix;
+    if (!found.length) return BASIC_SCHEMA;
+    const options = [...new Set([...(cur ? [cur] : []), ...found])].map((p) => ({ value: p, label: found.includes(p) ? `${p} (${prefixName(p)})` : p }));
+    if (this._prefixSig !== options.map((o) => o.value).join()) {
+      this._prefixSig = options.map((o) => o.value).join();
+      this._schema = BASIC_SCHEMA.map((f) => (f.name === "prefix" ? { name: "prefix", selector: { select: { options, custom_value: true, mode: "dropdown" } } } : f));
+    }
+    return this._schema;
+  }
+
   _updateTabs() {
     this.querySelectorAll(".bpc-tab").forEach((btn) => {
       btn.classList.toggle("active", btn.dataset.tab === this._tab);
@@ -2017,7 +2091,7 @@ class BatteryPackCardEditor extends HTMLElement {
   _updateActiveTab() {
     if (this._tab === "basic") {
       this._basicForm.hass = this._hass;
-      this._basicForm.schema = BASIC_SCHEMA;
+      this._basicForm.schema = this._basicSchema();
       this._basicForm.data = { ...DEFAULTS, ...this._config };
     } else {
       const N = Math.max(1, Math.min(32, parseInt(this._config.cells, 10) || 16));

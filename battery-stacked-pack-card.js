@@ -18,7 +18,7 @@
  */
 
 (() => {
-const VERSION = "1.8.0";
+const VERSION = "1.9.0-alpha.1";
 if (customElements.get("battery-stacked-pack-card")) return;
 
 const DEFAULTS = {
@@ -110,7 +110,11 @@ const packConfigs = (cfg) => (Array.isArray(cfg.packs) ? cfg.packs : []).map((p,
 });
 
 class BatteryStackedPackCard extends HTMLElement {
-  static getStubConfig() {
+  static getStubConfig(hass) {
+    // Start with the JK-BMS add-on packs found in this Home Assistant, if any.
+    const Pack = customElements.get("battery-pack-card");
+    const found = Pack && Pack.findPacks ? Pack.findPacks(hass) : [];
+    if (found.length) return { name: "Battery Bank", packs: found.slice(0, 16) };
     return {
       name: "Battery Bank",
       packs: [
@@ -857,6 +861,7 @@ class BatteryStackedPackCardEditor extends HTMLElement {
       this._bankForm.schema = BANK_SCHEMA;
       this._bankForm.data = { ...DEFAULTS, ...this._config };
       this._updateTotalRows();
+      this._updateFound();
       return;
     }
     const i = this._tab, packs = this._config.packs;
@@ -926,6 +931,11 @@ class BatteryStackedPackCardEditor extends HTMLElement {
       <div class="bspc-tabs"></div>
       <div class="bspc-bank">
         <div class="bspc-form-bank"></div>
+        <div class="bspc-found" hidden>
+          <div class="bspc-title">Packs found</div>
+          <div class="bspc-hint"></div>
+          <div class="bspc-tools"><button type="button" class="bspc-add-found"></button></div>
+        </div>
         <div class="bspc-title">Bank totals</div>
         <div class="bspc-hint">Optional, for the bank display on top of the cabinet. A field left empty is worked out from the packs where possible (voltage, current, SOC, power, remaining capacity). Use { } next to a field to enter a template instead of an entity, e.g. to add up several stacks.</div>
         <div class="bspc-form-totals"></div>
@@ -952,6 +962,9 @@ class BatteryStackedPackCardEditor extends HTMLElement {
       return f;
     };
     this._bankForm = form(".bspc-form-bank");
+    this.querySelector(".bspc-add-found").addEventListener("click", () => {
+      if (this._found && this._found.length) this._setPacks([...this._config.packs, ...this._found]);
+    });
     const totals = this.querySelector(".bspc-form-totals");
     for (const [name] of TOTALS) totals.appendChild(this._totalRow(name));
 
@@ -1041,6 +1054,20 @@ class BatteryStackedPackCardEditor extends HTMLElement {
       r.sel.label = LABELS[r.name] || r.name;
       r.sel.value = this._config[r.name] ?? (tpl ? "" : undefined);
     }
+  }
+
+  // JK-BMS add-on packs in this HA that aren't in the card yet, with a button
+  // to add them all (Multi-Pack names like pack_1_bms_1 included).
+  _updateFound() {
+    const box = this.querySelector(".bspc-found");
+    const Pack = customElements.get("battery-pack-card");
+    const have = new Set(this._config.packs.map((p) => p && p.prefix).filter(Boolean));
+    this._found = (Pack && Pack.findPacks ? Pack.findPacks(this._hass) : []).filter((f) => !have.has(f.prefix));
+    box.hidden = !this._found.length;
+    if (!this._found.length) return;
+    box.querySelector(".bspc-hint").textContent =
+      `In Home Assistant but not in this card: ${this._found.map((f) => f.prefix).join(", ")}.`;
+    box.querySelector(".bspc-add-found").textContent = `+ Add ${this._found.length === 1 ? "this pack" : `these ${this._found.length} packs`}`;
   }
 
   _renderTabs() {
