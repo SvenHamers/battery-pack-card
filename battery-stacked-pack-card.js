@@ -18,7 +18,7 @@
  */
 
 (() => {
-const VERSION = "1.7.0";
+const VERSION = "1.8.0";
 if (customElements.get("battery-stacked-pack-card")) return;
 
 const DEFAULTS = {
@@ -30,6 +30,7 @@ const DEFAULTS = {
   highlight_soc: true,   // red border on the lowest SOC pack, green on the highest
   show_legend: true,
   show_bank_display: true,   // the JK-style display on top of the cabinet
+  capacity_unit: "Ah",       // "Ah" or "kWh", for the display and, unless set there, the packs
   // Bank totals for that display, each an entity or a template. Whatever is
   // left blank is worked out from the packs where that makes sense.
   entity_soc: "",
@@ -103,7 +104,7 @@ const socColor = (s) => (s > 50 ? "var(--clr-green)" : s > 20 ? "var(--clr-orang
 
 // Every pack's effective battery-pack-card config.
 const packConfigs = (cfg) => (Array.isArray(cfg.packs) ? cfg.packs : []).map((p, i) => {
-  const c = { ...(cfg.pack_defaults || {}), ...(p || {}) };
+  const c = { capacity_unit: cfg.capacity_unit, ...(cfg.pack_defaults || {}), ...(p || {}) };
   if (!c.name) c.name = `Pack ${i + 1}`;
   return c;
 });
@@ -408,11 +409,25 @@ class BatteryStackedPackCard extends HTMLElement {
     const pick = (key, derived) => (T[key] ? T[key] : derived !== null && derived !== undefined && Number.isFinite(derived) ? { n: derived, text: null } : null);
 
     const capTot = sum("capacityTotal"), capRemSum = sum("capacityRemaining");
+    // Capacity as energy (kWh): each pack's Ah × its nominal voltage. A bank
+    // entity in Ah gets the packs' mean nominal voltage; one in Wh / kWh is
+    // energy already.
+    const kwh = c.capacity_unit === "kWh";
+    const nomV = mean("nominalVoltage");
+    const toKwh = (t) => {
+      if (!t || t.text !== null || !Number.isFinite(t.n)) return t;
+      const u = String(t.unit || "").trim();
+      const n = /^kWh$/i.test(u) ? t.n : /^Wh$/i.test(u) ? t.n / 1000 : nomV ? (t.n * nomV) / 1000 : NaN;
+      return { ...t, n };
+    };
     const V = pick("entity_voltage", mean("voltage"));
     const A = pick("entity_current", sum("current"));
     const socDerived = capTot && capRemSum !== null ? (capRemSum / capTot) * 100 : mean("soc");
     const SOC = pick("entity_soc", socDerived);
-    const REM = pick("entity_capacity_remaining", capRemSum);
+    const REM = kwh ? (T.entity_capacity_remaining ? toKwh(T.entity_capacity_remaining) : pick("", sum("energyRemaining")))
+                    : pick("entity_capacity_remaining", capRemSum);
+    const capShown = kwh ? sum("energyTotal") : capTot;
+    const capUnit = kwh ? "kWh" : "Ah";
     const vxa = V && A && Number.isFinite(V.n) && Number.isFinite(A.n) && V.text === null && A.text === null ? V.n * A.n : null;
     const PWR = pick("entity_power", vxa !== null ? vxa : sum("power"));
     const cellMax = vals("cellMax").length ? Math.max(...vals("cellMax")) : null;
@@ -441,8 +456,8 @@ class BatteryStackedPackCard extends HTMLElement {
     const capDec = (n) => (Math.abs(n) >= 100 ? 0 : 1);
     const mid = [
       SOC ? `<div class="ring"${attrs(SOC)}><span class="arc" style="background:${socN === null ? "#1c1c1c" : ringGradient(socN)}"></span><span class="pct">${SOC.text !== null ? esc(SOC.text) : `${fmt(socN === null ? NaN : socN, 0)}%`}</span></div>` : "",
-      capTot !== null ? `<div class="cap"><span class="v">${fmt(capTot, capDec(capTot))}</span><span class="k">Bat-Capacity(Ah)</span></div>` : "",
-      REM ? `<div class="cap"${attrs(REM)}><span class="v">${REM.text !== null ? esc(REM.text) : fmt(REM.n, capDec(REM.n || 0))}</span><span class="k">Rem-Capacity(Ah)</span></div>` : "",
+      capShown !== null ? `<div class="cap"><span class="v">${fmt(capShown, capDec(capShown))}</span><span class="k">Bat-Capacity(${capUnit})</span></div>` : "",
+      REM ? `<div class="cap"${attrs(REM)}><span class="v">${REM.text !== null ? esc(REM.text) : fmt(REM.n, capDec(REM.n || 0))}</span><span class="k">Rem-Capacity(${capUnit})</span></div>` : "",
     ].join("");
     const col = (a, b) => (a || b ? `<div class="col">${a}${b}</div>` : "");
     const bot = [
@@ -772,6 +787,7 @@ const BANK_SCHEMA = [
       { name: "highlight_soc", selector: { boolean: {} } },
       { name: "show_legend", selector: { boolean: {} } },
       { name: "show_bank_display", selector: { boolean: {} } },
+      { name: "capacity_unit", selector: { select: { mode: "dropdown", options: [{ value: "Ah", label: "Ah (charge)" }, { value: "kWh", label: "kWh (energy)" }] } } },
     ],
   },
 ];
@@ -784,6 +800,7 @@ const LABELS = {
   highlight_soc: "Red / green border on lowest / highest SOC pack",
   show_legend: "Show colour legend",
   show_bank_display: "Show the bank display",
+  capacity_unit: "Capacity shown in",
   entity_soc: "Bank SOC",
   entity_voltage: "Bank voltage",
   entity_current: "Bank current",

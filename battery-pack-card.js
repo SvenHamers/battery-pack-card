@@ -15,7 +15,7 @@
  * Click any element to open the matching entity's more-info dialog.
  */
 
-const VERSION = "1.7.0";
+const VERSION = "1.8.0";
 
 const DEFAULTS = {
   name: "",
@@ -57,8 +57,24 @@ const DEFAULTS = {
   // Free-form label/value rows per pack behind a "More info" button. Stored in
   // HA (2025.12+), keyed by info_key, else the prefix, SOC entity or name.
   show_info: true,
+  // Tiles, pills and lines for sensors that don't exist are hidden. On: show
+  // them anyway (as 0, OFF or —), the way the card worked before 1.8.
+  show_missing: false,
   info_key: "",
+  // Capacity as charge (Ah) or as energy (kWh = Ah × nominal voltage). The
+  // nominal voltage defaults to cells × 3.2 V, LiFePO4's nominal cell voltage.
+  capacity_unit: "Ah",
+  nominal_voltage: "",
+  // One switch per status pill. A pill whose entity doesn't exist is hidden
+  // regardless, so a BMS without a heater shows no Heater pill.
+  show_pill_charge: true,
+  show_pill_discharge: true,
+  show_pill_balance: true,
+  show_pill_heater: true,
 };
+
+// LiFePO4 nominal cell voltage, for kWh when no nominal_voltage is set.
+const NOMINAL_CELL_V = 3.2;
 
 const BASIC_SCHEMA = [
   { name: "name", selector: { text: {} } },
@@ -76,6 +92,7 @@ const BASIC_SCHEMA = [
       { name: "show_summary",      selector: { boolean: {} } },
       { name: "show_temperatures", selector: { boolean: {} } },
       { name: "show_info",         selector: { boolean: {} } },
+      { name: "show_missing",      selector: { boolean: {} } },
     ],
   },
 ];
@@ -183,6 +200,29 @@ const ADVANCED_SECTIONS = [
               { value: "F",    label: "°F (Fahrenheit)" },
             ], mode: "dropdown" } },
           },
+          {
+            name: "capacity_unit",
+            selector: { select: { options: [
+              { value: "Ah",  label: "Ah (charge)" },
+              { value: "kWh", label: "kWh (energy)" },
+            ], mode: "dropdown" } },
+          },
+          { name: "nominal_voltage", selector: { number: { min: 1, max: 1000, step: 0.1, mode: "box", unit_of_measurement: "V" } } },
+        ],
+      },
+    ],
+  },
+  {
+    title: "Status pills",
+    schema: [
+      {
+        type: "grid",
+        name: "",
+        schema: [
+          { name: "show_pill_charge",    selector: { boolean: {} } },
+          { name: "show_pill_discharge", selector: { boolean: {} } },
+          { name: "show_pill_balance",   selector: { boolean: {} } },
+          { name: "show_pill_heater",    selector: { boolean: {} } },
         ],
       },
     ],
@@ -276,6 +316,12 @@ const LABELS = {
   cells_min_width: "Cell tile min width (px)",
   cells_max_columns: "Cell grid max columns",
   temperature_unit: "Temperature unit",
+  capacity_unit: "Capacity shown in",
+  nominal_voltage: "Nominal pack voltage for kWh (blank = cells × 3.2 V)",
+  show_pill_charge: "Charge",
+  show_pill_discharge: "Discharge",
+  show_pill_balance: "Balance",
+  show_pill_heater: "Heater",
   temp_cold: "Blue below (default 5 °C / 41 °F)",
   temp_warm: "Amber from (default 35 °C / 95 °F)",
   temp_hot: "Red from (default 50 °C / 122 °F)",
@@ -286,6 +332,7 @@ const LABELS = {
   delta_bad: "Summary Δ red at (mV)",
   max_cell_red: "Highest cell in red, lowest in green",
   show_info: "Pack info (More info button)",
+  show_missing: "Also show sensors that don't exist",
   info_key: "Pack info key (blank = prefix, SOC entity or card title)",
 };
 
@@ -1064,7 +1111,11 @@ class BatteryPackCard extends HTMLElement {
       soc: val(E.soc), soh: val(E.soh),
       voltage: val(E.packV), current: val(E.curA), power: has(E.powW) ? this._watts(E.powW) : null,
       cellMin, cellMax,
-      capacityRemaining: val(E.capRem), capacityTotal: val(E.capTot),
+      capacityRemaining: has(E.capRem) ? this._capacity(E.capRem).ah : null,
+      capacityTotal: has(E.capTot) ? this._capacity(E.capTot).ah : null,
+      energyRemaining: has(E.capRem) ? this._capacity(E.capRem).kwh : null,
+      energyTotal: has(E.capTot) ? this._capacity(E.capTot).kwh : null,
+      nominalVoltage: this._nominalV(),
       deltaMv, deltaState, temp,
       alarm: has(E.alarmB) ? this._on(E.alarmB) : null,
       alarmText: has(E.alarmS) ? this._state(E.alarmS) : null,
@@ -1100,6 +1151,32 @@ class BatteryPackCard extends HTMLElement {
   // Power in W, whatever unit the entity reports it in (W, kW, MW): a
   // 3.25 kW sensor read as a bare number showed as "3 W". A template's
   // result has no unit and is taken as W.
+  // Nominal pack voltage, for converting Ah into kWh.
+  _nominalV() {
+    const v = numOr(this._config.nominal_voltage, 0);
+    return v > 0 ? v : (intOr(this._config.cells, 16) || 16) * NOMINAL_CELL_V;
+  }
+
+  // A capacity reading as { ah, kwh }. Most BMSes report Ah; a sensor in Wh
+  // or kWh is energy already, and Ah is then worked back from the nominal V.
+  _capacity(eid) {
+    const v = parseFloat(this._state(eid));
+    if (!Number.isFinite(v)) return { ah: NaN, kwh: NaN };
+    const u = isTpl(eid) ? "" : String(this._hass?.states[eid]?.attributes?.unit_of_measurement || "").trim();
+    const nv = this._nominalV();
+    if (/^kWh$/i.test(u)) return { ah: (v * 1000) / nv, kwh: v };
+    if (/^Wh$/i.test(u)) return { ah: v / nv, kwh: v / 1000 };
+    return { ah: v, kwh: (v * nv) / 1000 };
+  }
+
+  // "624.0 / 628 Ah" or "31.9 / 32.2 kWh", as configured.
+  _capacityText(E) {
+    const r = this._capacity(E.capRem), t = this._capacity(E.capTot);
+    const z = (x) => (Number.isFinite(x) ? x : 0);
+    if (this._config.capacity_unit === "kWh") return `${fmt(z(r.kwh), 1)} / ${fmt(z(t.kwh), 1)} kWh`;
+    return `${fmt(z(r.ah), 1)} / ${fmt(z(t.ah), 0)} Ah`;
+  }
+
   _watts(eid) {
     const v = parseFloat(this._state(eid));
     if (!Number.isFinite(v)) return NaN;
@@ -1201,11 +1278,11 @@ class BatteryPackCard extends HTMLElement {
     const soh   = this._num(E.soh);
     const packV = this._num(E.packV);
     const curA  = this._num(E.curA);
-    const powW  = Number.isFinite(this._watts(E.powW)) ? this._watts(E.powW) : 0;
+    // No power sensor: voltage × current, which is what the BMS would report.
+    const powRaw= this._exists(E.powW) ? this._watts(E.powW) : this._num(E.packV) * this._num(E.curA);
+    const powW  = Number.isFinite(powRaw) ? powRaw : 0;
     const balA  = this._num(E.balA);
     const cycles= this._state(E.cycles) || "0";
-    const capRem= this._num(E.capRem);
-    const capTot= this._num(E.capTot);
     const runtime= this._state(E.runtime) || "";
     // Voltage units are read off the data (see MV_CUTOFF); the configured
     // units only apply until a reading is available.
@@ -1252,13 +1329,25 @@ class BatteryPackCard extends HTMLElement {
     const balAct = this._on(E.balAct);
     const balAllow = this._on(E.balAllow);
     const heatOn = this._on(E.heat);
+    // Each pill only when switched on and its entity exists: a "Heater OFF"
+    // on a BMS without a heater is misleading.
+    const showMissing = cfg.show_missing === true || cfg.show_missing === "true";
+    const shown = (eid) => showMissing || this._exists(eid);
+    const showPill = (key, ...eids) => cfg[`show_pill_${key}`] !== false && cfg[`show_pill_${key}`] !== "false" && eids.some(shown);
+    const pills = [
+      showPill("charge", E.chg)    ? this._pill("Charge",    chgOn ? "ON" : "OFF", chgOn ? "on" : "off", E.chg) : "",
+      showPill("discharge", E.dch) ? this._pill("Discharge", dchOn ? "ON" : "OFF", dchOn ? "on" : "off", E.dch) : "",
+      showPill("balance", E.balAct, E.balAllow) ? this._pill("Balance", balAct ? "ACTIVE" : (balAllow ? "READY" : "OFF"),
+                     balAct ? "active" : (balAllow ? "on" : "off"), this._exists(E.balAct) ? E.balAct : E.balAllow) : "",
+      showPill("heater", E.heat)   ? this._pill("Heater",    heatOn ? "ON" : "OFF", heatOn ? "alert" : "off", E.heat) : "",
+    ].join("");
 
     // Temperature tiles: only for sensors that actually exist in HA. An
     // unconfigured probe (or a prefix default that matches nothing) is
     // dropped instead of rendering as a misleading 0°.
     const tempTiles = [
       ["MOS", E.tMos], ["Probe 1", E.t1], ["Probe 2", E.t2], ["Probe 3", E.t3], ["Probe 4", E.t4],
-    ].filter(([, eid]) => this._exists(eid))
+    ].filter(([, eid]) => shown(eid))
      .map(([label, eid]) => this._tempTile(label, eid))
      .join("");
 
@@ -1269,6 +1358,19 @@ class BatteryPackCard extends HTMLElement {
     if (curA < -0.1) { powerDir = "discharging"; powerColor = "var(--clr-orange)"; }
     const socColor = soc > 50 ? "var(--clr-green)" : soc > 20 ? "var(--clr-orange)" : "var(--clr-red)";
 
+    // Stat tiles only for sensors that exist (issue #4): a BMS read over RS485
+    // via the inverter often has no cycles, phase or balance current, and an
+    // empty tile showing 0 suggests a reading that isn't there.
+    const has = shown;
+    const stats = [
+      has(E.packV)  ? this._stat("VOLTAGE", `${fmt(packV, 2)} V`, "var(--clr-amber)",  null, E.packV) : "",
+      has(E.curA)   ? this._stat("CURRENT", `${fmt(curA, 1)} A`,  "var(--clr-blue)",   null, E.curA) : "",
+      has(E.powW) || (has(E.packV) && has(E.curA))
+                    ? this._stat("POWER",   `${fmt(powW, 0)} W`,  powerColor, powerDir.toUpperCase(), has(E.powW) ? E.powW : E.curA) : "",
+      has(E.balA)   ? this._stat("BALANCE", `${fmt(balA, 2)} A`,  "var(--clr-purple)", null, E.balA) : "",
+      has(E.cycles) ? this._stat("CYCLES",  cycles, "var(--clr-cyan)", null, E.cycles) : "",
+      has(E.phase)  ? this._stat("PHASE",   phase,  "var(--clr-grey)", null, E.phase) : "",
+    ].join("");
     const html = `
       <div class="header">
         <div class="title">${this._esc(cfg.name)}</div>
@@ -1279,26 +1381,15 @@ class BatteryPackCard extends HTMLElement {
 
       ${(cfg.show_battery || cfg.show_stats) ? `
       <div class="hero">
-        ${cfg.show_battery ? this._renderBattery(soc, socColor, capRem, capTot, soh, E.soc) : ""}
-        ${cfg.show_stats ? `
-          <div class="stats">
-            ${this._stat("VOLTAGE", `${fmt(packV, 2)} V`, "var(--clr-amber)",  null, E.packV)}
-            ${this._stat("CURRENT", `${fmt(curA, 1)} A`,  "var(--clr-blue)",   null, E.curA)}
-            ${this._stat("POWER",   `${fmt(powW, 0)} W`,  powerColor, powerDir.toUpperCase(), E.powW)}
-            ${this._stat("BALANCE", `${fmt(balA, 2)} A`,  "var(--clr-purple)", null, E.balA)}
-            ${this._stat("CYCLES",  cycles, "var(--clr-cyan)", null, E.cycles)}
-            ${this._stat("PHASE",   phase,  "var(--clr-grey)", null, E.phase)}
-          </div>` : ""}
+        ${cfg.show_battery ? this._renderBattery(soc, socColor,
+            shown(E.capRem) || shown(E.capTot) ? this._capacityText(E) : "",
+            shown(E.soh) ? `SOH ${Math.round(soh)}%` : "", E.soc) : ""}
+        ${cfg.show_stats && stats ? `
+          <div class="stats">${stats}</div>` : ""}
       </div>` : ""}
 
-      ${cfg.show_pills ? `
-      <div class="pills">
-        ${this._pill("Charge",    chgOn ? "ON" : "OFF",   chgOn ? "on" : "off", E.chg)}
-        ${this._pill("Discharge", dchOn ? "ON" : "OFF",   dchOn ? "on" : "off", E.dch)}
-        ${this._pill("Balance",   balAct ? "ACTIVE" : (balAllow ? "READY" : "OFF"),
-                     balAct ? "active" : (balAllow ? "on" : "off"), E.balAct)}
-        ${this._pill("Heater",    heatOn ? "ON" : "OFF",  heatOn ? "alert" : "off", E.heat)}
-      </div>` : ""}
+      ${cfg.show_pills && pills ? `
+      <div class="pills">${pills}</div>` : ""}
 
       ${cfg.show_cells ? `
         <div class="section-label">CELLS — voltage and resistance, colour = mV from pack avg (${dev.soft}/${dev.warn}/${dev.bad})</div>
@@ -1336,7 +1427,7 @@ class BatteryPackCard extends HTMLElement {
     return eid ? `data-entity="${this._esc(eid)}"` : "";
   }
 
-  _renderBattery(soc, color, capRem, capTot, soh, entityId) {
+  _renderBattery(soc, color, capText, sohText, entityId) {
     const fillH = (Math.max(0, Math.min(100, soc)) / 100) * 210;
     const fillY = 235 - fillH;
     const fillW = (Math.max(0, Math.min(100, soc)) / 100) * 270;   // horizontal variant
@@ -1356,8 +1447,8 @@ class BatteryPackCard extends HTMLElement {
         <rect x="5"  y="18" width="120" height="232" rx="10" fill="rgba(255,255,255,0.04)" stroke="rgba(255,255,255,0.3)" stroke-width="2.5"/>
         <rect x="11" y="${fillY}" width="108" height="${fillH}" rx="5" fill="url(#${gid})"/>
         <text x="65" y="130" text-anchor="middle" fill="#fff" font-size="36" font-weight="700">${Math.round(soc)}%</text>
-        <text x="65" y="155" text-anchor="middle" fill="rgba(255,255,255,0.85)" font-size="11">${fmt(capRem, 1)} / ${fmt(capTot, 0)} Ah</text>
-        <text x="65" y="172" text-anchor="middle" fill="rgba(255,255,255,0.65)" font-size="11">SOH ${Math.round(soh)}%</text>
+        <text x="65" y="155" text-anchor="middle" fill="rgba(255,255,255,0.85)" font-size="11">${this._esc(capText)}</text>
+        <text x="65" y="172" text-anchor="middle" fill="rgba(255,255,255,0.65)" font-size="11">${this._esc(sohText)}</text>
       </svg>
       <svg class="battery-h" viewBox="0 0 300 76" preserveAspectRatio="xMidYMid meet" ${this._dataE(entityId)} aria-hidden="true">
         <defs>
@@ -1370,8 +1461,8 @@ class BatteryPackCard extends HTMLElement {
         <rect x="287" y="24" width="11" height="28" rx="3" style="fill:var(--primary-text-color,#fff);fill-opacity:0.35"/>
         <rect x="8" y="8" width="${fillW}" height="60" rx="5" fill="url(#${gid}_h)"/>
         <text x="20" y="49" style="fill:var(--primary-text-color,#fff)" font-size="30" font-weight="700">${Math.round(soc)}%</text>
-        <text x="272" y="33" text-anchor="end" style="fill:var(--primary-text-color,#fff);fill-opacity:0.85" font-size="12">${fmt(capRem, 1)} / ${fmt(capTot, 0)} Ah</text>
-        <text x="272" y="51" text-anchor="end" style="fill:var(--primary-text-color,#fff);fill-opacity:0.65" font-size="12">SOH ${Math.round(soh)}%</text>
+        <text x="272" y="33" text-anchor="end" style="fill:var(--primary-text-color,#fff);fill-opacity:0.85" font-size="12">${this._esc(capText)}</text>
+        <text x="272" y="51" text-anchor="end" style="fill:var(--primary-text-color,#fff);fill-opacity:0.65" font-size="12">${this._esc(sohText)}</text>
       </svg>
     `;
   }

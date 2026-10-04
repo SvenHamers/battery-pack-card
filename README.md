@@ -66,11 +66,12 @@ If you use the JK-BMS RS485 addon, `prefix` is the only required field.
 | `alarm_prefix`      | string  | `<prefix>_<prefix>`         | Prefix for `*_alarm_status` / `*_alarm_active`.               |
 | `cells`             | integer | `16`                        | Number of series cells to render (4–32).                      |
 | `show_battery`      | bool    | `true`                      | Show the SVG battery silhouette with SOC fill.                |
-| `show_stats`        | bool    | `true`                      | Show the 6-tile stat grid.                                    |
-| `show_pills`        | bool    | `true`                      | Show charge / discharge / balance / heater status pills.      |
+| `show_stats`        | bool    | `true`                      | Show the stat tiles (voltage, current, power, balance, cycles, phase). Tiles whose sensor doesn't exist are hidden; without a power sensor, power is voltage × current. |
+| `show_pills`        | bool    | `true`                      | Show charge / discharge / balance / heater status pills. Pills whose sensor doesn't exist are hidden; each can also be switched off, see [Status pills](#status-pills). |
 | `show_cells`        | bool    | `true`                      | Show the per-cell voltage + resistance grid.                  |
 | `show_summary`      | bool    | `true`                      | Show the min / avg / max / Δ summary line.                    |
 | `show_temperatures` | bool    | `true`                      | Show the temperature strip (MOSFET + up to 4 probes). Tiles whose sensor doesn't exist are hidden. |
+| `show_missing`      | bool    | `false`                     | Also show tiles, pills and lines for sensors that don't exist (as `0`, `OFF` or `—`), the way the card worked before 1.8. Off: they're hidden. |
 
 ## Advanced configuration
 
@@ -187,6 +188,21 @@ The card stores voltages internally in V and resistances in Ω. **Voltage units 
 | `temp_cold`                  | `5` °C / `41` °F   | Temperature tiles turn **blue** below this.   |
 | `temp_warm`                  | `35` °C / `95` °F  | … **amber** from this (green in between).     |
 | `temp_hot`                   | `50` °C / `122` °F | … **red** from this. The three are set in the unit the card shows (`temperature_unit`, or on `auto` Home Assistant's own unit); leave them blank for the defaults. Sorted before use; negative values are fine. |
+| `capacity_unit`              | `Ah`    | Capacity in the battery as charge, `Ah`, or as energy, `kWh` (e.g. `624.0 / 628 Ah` becomes `31.9 / 32.2 kWh` at 51.2 V). A capacity sensor that already reports Wh or kWh is used as is. |
+| `nominal_voltage`            | *(cells × 3.2 V)* | Pack voltage used for kWh = Ah × V. Blank: LiFePO4's 3.2 V per cell, so 51.2 V for 16 cells. Set it for other chemistries, e.g. `58.8` for 16 NMC cells at 3.7 V. |
+
+### Status pills
+
+The charge, discharge, balance and heater pills only show when their sensor exists, so a BMS without a heater shows no Heater pill. To hide a pill whose sensor does exist, switch it off (in the editor under *Advanced → Status pills*):
+
+| Key                   | Default | Description |
+| --------------------- | ------- | ----------- |
+| `show_pill_charge`    | `true`  | Charge switch pill. |
+| `show_pill_discharge` | `true`  | Discharge switch pill. |
+| `show_pill_balance`   | `true`  | Balance pill (active / ready / off). |
+| `show_pill_heater`    | `true`  | Heater pill. |
+
+The same goes for the rest of the card: stat tiles, temperature tiles, and the capacity and SOH lines in the battery only appear for sensors that exist. With only voltage, current and one temperature probe, that's all the card shows. Prefer to see everything, missing sensors included? Turn on `show_missing` (Basic tab: *Also show sensors that don't exist*); a pill you switched off above stays hidden.
 
 ### Cell colouring thresholds
 
@@ -286,6 +302,7 @@ Each pack's screen shows its SOC (with a bar), voltage, current, cell Δ and its
 | `highlight_soc`             | bool    | `true`         | Red border on the lowest and green border on the highest SOC pack. `false` turns both off. In the editor: *Red / green border on lowest / highest SOC pack*. |
 | `show_legend`               | bool    | `true`         | Colour legend under the cabinet. |
 | `show_bank_display`         | bool    | `true`         | The bank display on top of the cabinet. |
+| `capacity_unit`             | string  | `Ah`           | `Ah` or `kWh`, for the display's Bat- and Rem-Capacity, and for the packs' own cards unless a pack (or `pack_defaults`) sets its own. kWh uses each pack's nominal voltage (see the pack card's `nominal_voltage`). |
 | `entity_soc`                | entity or template | — | Bank SOC, in the ring. Blank: worked out from the packs. |
 | `entity_voltage`            | entity or template | — | Bank voltage (Vtg). Blank: the packs' mean. |
 | `entity_current`            | entity or template | — | Bank current (Cur). Blank: the packs' sum. |
