@@ -18,7 +18,7 @@
  */
 
 (() => {
-const VERSION = "1.9.0-alpha.1";
+const VERSION = "1.9.0-alpha.2";
 if (customElements.get("battery-stacked-pack-card")) return;
 
 const DEFAULTS = {
@@ -30,6 +30,7 @@ const DEFAULTS = {
   highlight_soc: true,   // red border on the lowest SOC pack, green on the highest
   show_legend: true,
   show_bank_display: true,   // the JK-style display on top of the cabinet
+  bank_display_size: "full", // "full", or "compact": one slim line
   capacity_unit: "Ah",       // "Ah" or "kWh", for the display and, unless set there, the packs
   // Bank totals for that display, each an entity or a template. Whatever is
   // left blank is worked out from the packs where that makes sense.
@@ -38,6 +39,10 @@ const DEFAULTS = {
   entity_current: "",
   entity_power: "",
   entity_capacity_remaining: "",
+  entity_capacity_total: "",
+  // For kWh from a bank entity in Ah. Blank: the packs' mean nominal voltage,
+  // or without packs the bank voltage.
+  nominal_voltage: "",
   pack_defaults: {},
   packs: [],
 };
@@ -50,6 +55,7 @@ const TOTALS = [
   ["entity_current",            "CURRENT",   "A",   "A",  1, true],
   ["entity_capacity_remaining", "REMAINING", "Ah",  "Ah", 0, false],
   ["entity_power",              "POWER",     "W",   "W",  0, true],
+  ["entity_capacity_total",     "CAPACITY",  "Cap", "Ah", 0, false],
 ];
 
 const fmt = (n, d = 0, signed = false) => {
@@ -300,7 +306,9 @@ class BatteryStackedPackCard extends HTMLElement {
     if (!this._config || !this._cab) return;
     const sums = (this._sources || []).map((s) => s.summary());
     const c = this._config;
-    this._cab.hidden = !!this._incompatible;
+    // No packs: a display-only card (e.g. the totals of several stacks).
+    this._cab.hidden = !!this._incompatible || !this._packCfgs.length;
+    this._rack.classList.toggle("no-packs", !this._packCfgs.length);
 
     // SOC extremes, as the cell grid marks its lowest and highest cell.
     let minI = -1, maxI = -1;
@@ -323,8 +331,6 @@ class BatteryStackedPackCard extends HTMLElement {
       box.style.setProperty("--sc", s && fin(s.soc) ? socColor(s.soc) : "var(--clr-grey)");
     });
 
-    const head = this._renderHead(sums);
-    if (head !== this._headHtml) { this._headHtml = head; this._head.innerHTML = head; }
     const disp = this._incompatible ? "" : this._renderDisplay(sums);
     if (disp !== this._dispHtml) {
       this._dispHtml = disp;
@@ -332,6 +338,8 @@ class BatteryStackedPackCard extends HTMLElement {
       this._disp.hidden = !disp;
       this._rack.classList.toggle("has-disp", !!disp);
     }
+    const head = this._renderHead(sums);
+    if (head !== this._headHtml) { this._headHtml = head; this._head.innerHTML = head; }
     const legend = c.show_legend !== false ? this._renderLegend(sums, minI >= 0) : "";
     if (legend !== this._legendHtml) { this._legendHtml = legend; this._legend.innerHTML = legend; }
   }
@@ -385,7 +393,7 @@ class BatteryStackedPackCard extends HTMLElement {
     return `
       <div class="s-head"><div class="s-title">${esc(c.name)}</div>${pill}</div>
       ${this._incompatible ? `<div class="empty warn">An older Battery Pack Card is loaded in this browser, from a second dashboard resource or bundled with an integration, and the stacked card needs v${VERSION} or newer. Remove the extra copy so only the HACS one loads, then reload.</div>` : ""}
-      ${this._packCfgs.length ? "" : `<div class="empty">No packs yet. Add them in the card editor, or under <code>packs:</code> in YAML.</div>`}`;
+      ${this._packCfgs.length || this._dispHtml ? "" : `<div class="empty">No packs yet. Add them in the card editor, or under <code>packs:</code> in YAML.</div>`}`;
   }
 
   // The bank display: a JK BMS-style screen in a bezel on top of the cabinet.
@@ -417,20 +425,22 @@ class BatteryStackedPackCard extends HTMLElement {
     // entity in Ah gets the packs' mean nominal voltage; one in Wh / kWh is
     // energy already.
     const kwh = c.capacity_unit === "kWh";
-    const nomV = mean("nominalVoltage");
+    const V = pick("entity_voltage", mean("voltage"));
+    const nvSet = parseFloat(c.nominal_voltage);
+    const nomV = nvSet > 0 ? nvSet : mean("nominalVoltage") || (V && V.text === null && Number.isFinite(V.n) ? V.n : null);
     const toKwh = (t) => {
       if (!t || t.text !== null || !Number.isFinite(t.n)) return t;
       const u = String(t.unit || "").trim();
       const n = /^kWh$/i.test(u) ? t.n : /^Wh$/i.test(u) ? t.n / 1000 : nomV ? (t.n * nomV) / 1000 : NaN;
       return { ...t, n };
     };
-    const V = pick("entity_voltage", mean("voltage"));
     const A = pick("entity_current", sum("current"));
     const socDerived = capTot && capRemSum !== null ? (capRemSum / capTot) * 100 : mean("soc");
     const SOC = pick("entity_soc", socDerived);
     const REM = kwh ? (T.entity_capacity_remaining ? toKwh(T.entity_capacity_remaining) : pick("", sum("energyRemaining")))
                     : pick("entity_capacity_remaining", capRemSum);
-    const capShown = kwh ? sum("energyTotal") : capTot;
+    const CAP = kwh ? (T.entity_capacity_total ? toKwh(T.entity_capacity_total) : pick("", sum("energyTotal")))
+                    : pick("entity_capacity_total", capTot);
     const capUnit = kwh ? "kWh" : "Ah";
     const vxa = V && A && Number.isFinite(V.n) && Number.isFinite(A.n) && V.text === null && A.text === null ? V.n * A.n : null;
     const PWR = pick("entity_power", vxa !== null ? vxa : sum("power"));
@@ -460,17 +470,31 @@ class BatteryStackedPackCard extends HTMLElement {
     const capDec = (n) => (Math.abs(n) >= 100 ? 0 : 1);
     const mid = [
       SOC ? `<div class="ring"${attrs(SOC)}><span class="arc" style="background:${socN === null ? "#1c1c1c" : ringGradient(socN)}"></span><span class="pct">${SOC.text !== null ? esc(SOC.text) : `${fmt(socN === null ? NaN : socN, 0)}%`}</span></div>` : "",
-      capShown !== null ? `<div class="cap"><span class="v">${fmt(capShown, capDec(capShown))}</span><span class="k">Bat-Capacity(${capUnit})</span></div>` : "",
+      CAP ? `<div class="cap"${attrs(CAP)}><span class="v">${CAP.text !== null ? esc(CAP.text) : fmt(CAP.n, capDec(CAP.n || 0))}</span><span class="k">Bat-Capacity(${capUnit})</span></div>` : "",
       REM ? `<div class="cap"${attrs(REM)}><span class="v">${REM.text !== null ? esc(REM.text) : fmt(REM.n, capDec(REM.n || 0))}</span><span class="k">Rem-Capacity(${capUnit})</span></div>` : "",
     ].join("");
     const col = (a, b) => (a || b ? `<div class="col">${a}${b}</div>` : "");
     const bot = [
       col(item("Max.Cell:", cellMax === null ? null : `${fmt(cellMax, 3)}V`), item("Min.Cell:", cellMin === null ? null : `${fmt(cellMin, 3)}V`)),
       col(item("Temp:", temp === null ? null : `${fmt(temp, 0)}°`), PWR ? item("Pwr(kW):", show(PWR, 2, "", 1000), PWR) : ""),
-      col(watched.length ? item("Alarm:", alarms ? "Alarm" : "Normal", null, alarms ? "red" : "") : "", item("Packs:", String(this._packCfgs.length))),
+      col(watched.length ? item("Alarm:", alarms ? "Alarm" : "Normal", null, alarms ? "red" : "") : "", this._packCfgs.length ? item("Packs:", String(this._packCfgs.length)) : ""),
       col(chg ? item("CHG:", chg[0], null, chg[1]) : "", dch ? item("DCH:", dch[0], null, dch[1]) : ""),
     ].filter(Boolean);
     if (!top && !mid && !bot.length) return "";
+    if (c.bank_display_size === "compact") {
+      // One slim line: a small ring and the headline figures.
+      const items = [
+        V ? item("Vtg:", show(V, 2, "V"), V) : "",
+        A ? item("Cur:", show(A, 1, "A"), A) : "",
+        PWR ? item("Pwr:", show(PWR, 2, "kW", 1000), PWR) : "",
+        REM ? item("Rem:", REM.text !== null ? esc(REM.text) : `${fmt(REM.n, capDec(REM.n || 0))}${capUnit}`, REM) : "",
+        alarms ? item("Alarm:", alarms === 1 ? "1 pack" : `${alarms} packs`, null, "red") : "",
+      ].join("");
+      return `<div class="jk compact">
+        ${SOC ? `<div class="ring sm"${attrs(SOC)}><span class="arc" style="background:${socN === null ? "#1c1c1c" : ringGradient(socN)}"></span><span class="pct">${SOC.text !== null ? esc(SOC.text) : `${fmt(socN === null ? NaN : socN, 0)}%`}</span></div>` : ""}
+        ${items ? `<div class="line">${items}</div>` : ""}
+      </div>`;
+    }
     return `<div class="jk">
       ${top ? `<div class="top">${top}</div>` : ""}
       ${mid ? `<div class="mid">${mid}</div>` : ""}
@@ -608,6 +632,7 @@ const CSS = `
     box-shadow: inset 0 2px 10px rgba(0,0,0,0.6);
   }
   .cabinet:empty { display: none; }
+  .cabinet[hidden] { display: none; }   /* the grid display above would override [hidden] */
   /* One column, as wide as box_min_width but never narrower than 220px; the
      cabinet grows with it, so the packs stay inside it and centred. */
   .cabinet.single { --gap: 3px; }
@@ -694,6 +719,17 @@ const CSS = `
   .mounted::before, .mounted::after { content: ""; position: absolute; top: 4px; width: 4px; height: 4px; border-radius: 50%; background: radial-gradient(circle at 35% 35%, #bbb, #555); }
   .mounted::before { left: 4px; } .mounted::after { right: 4px; }
   #rack.has-disp .cabinet { border-radius: 0 0 10px 10px; }
+  /* Display only (no packs): the bezel is the whole device */
+  #rack.no-packs .mounted { border-radius: 10px; border-bottom: 1px solid rgba(255,255,255,0.08); }
+
+  /* Compact display: one slim line */
+  .jk.compact { display: flex; align-items: center; gap: 12px; padding: 8px 12px; }
+  .jk.compact .ring.sm { flex: none; width: 52px; height: 52px; }
+  .jk.compact .ring.sm .arc { -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 8px), #000 calc(100% - 7.5px));
+                                      mask: radial-gradient(farthest-side, transparent calc(100% - 8px), #000 calc(100% - 7.5px)); }
+  .jk.compact .ring.sm .pct { inset: 8px; font-size: 13px; }
+  .jk.compact .line { flex: 1; display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 14px; font-size: 13px; white-space: nowrap; }
+  .jk.compact .line .v { font-size: 17px; }
 
   /* The display itself, after the JK BMS screen: black, white labels, light
      green figures (sampled from the JK screen), the SOC ring. */
@@ -792,6 +828,8 @@ const BANK_SCHEMA = [
       { name: "show_legend", selector: { boolean: {} } },
       { name: "show_bank_display", selector: { boolean: {} } },
       { name: "capacity_unit", selector: { select: { mode: "dropdown", options: [{ value: "Ah", label: "Ah (charge)" }, { value: "kWh", label: "kWh (energy)" }] } } },
+      { name: "bank_display_size", selector: { select: { mode: "dropdown", options: [{ value: "full", label: "Full" }, { value: "compact", label: "Compact (one line)" }] } } },
+      { name: "nominal_voltage", selector: { number: { min: 1, max: 1000, step: 0.1, mode: "box", unit_of_measurement: "V" } } },
     ],
   },
 ];
@@ -805,6 +843,9 @@ const LABELS = {
   show_legend: "Show colour legend",
   show_bank_display: "Show the bank display",
   capacity_unit: "Capacity shown in",
+  bank_display_size: "Bank display",
+  nominal_voltage: "Nominal voltage for kWh (blank = from the packs)",
+  entity_capacity_total: "Bank total capacity",
   entity_soc: "Bank SOC",
   entity_voltage: "Bank voltage",
   entity_current: "Bank current",
@@ -999,6 +1040,9 @@ class BatteryStackedPackCardEditor extends HTMLElement {
     const row = document.createElement("div");
     row.className = "bspc-ent";
     const sel = document.createElement("ha-selector");
+    // Not required: HA then shows its ✕ to clear the field, instead of
+    // leaving YAML or the { } switch as the only way to empty it.
+    sel.required = false;
     const btn = document.createElement("button");
     btn.type = "button";
     btn.className = "bspc-tpl";

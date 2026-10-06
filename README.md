@@ -146,6 +146,8 @@ cell_voltage_pattern: "{{ states('sensor.pack_cell_{nn}') | float(0) / 1000 }}"
 
 Only sensors that actually exist in Home Assistant get a tile; the remaining tiles share the row. So a BMS with just a MOSFET sensor and two probes shows three tiles, not five with 0° fillers. A sensor that exists but is `unavailable` shows `—`.
 
+> **JK BMS: skip battery temperature 3.** On a JK BMS the third battery temperature is the same sensor as the MOS temperature, which is why the JK app only shows T1, T2, T4 and T5 next to the MOS (CMOS) temperature. If your integration exposes five battery temperatures (e.g. *Temperature 01* to *05*), point probes 1–4 at temperatures **1, 2, 4 and 5**, not 1–4; otherwise the card shows the MOS temperature twice and misses T5.
+
 ### Per-cell entities
 
 For each cell `n` (1..`cells`) the card resolves the voltage and resistance entities in this order:
@@ -305,14 +307,19 @@ Each pack's screen shows its SOC (with a bar), voltage, current, cell Δ and its
 | `highlight_soc`             | bool    | `true`         | Red border on the lowest and green border on the highest SOC pack. `false` turns both off. In the editor: *Red / green border on lowest / highest SOC pack*. |
 | `show_legend`               | bool    | `true`         | Colour legend under the cabinet. |
 | `show_bank_display`         | bool    | `true`         | The bank display on top of the cabinet. |
+| `bank_display_size`         | string  | `full`         | `full`: the JK-style screen. `compact`: one slim line with a small SOC ring, voltage, current, power and remaining capacity (and the alarm, when a pack is in alarm). |
 | `capacity_unit`             | string  | `Ah`           | `Ah` or `kWh`, for the display's Bat- and Rem-Capacity, and for the packs' own cards unless a pack (or `pack_defaults`) sets its own. kWh uses each pack's nominal voltage (see the pack card's `nominal_voltage`). |
 | `entity_soc`                | entity or template | — | Bank SOC, in the ring. Blank: worked out from the packs. |
 | `entity_voltage`            | entity or template | — | Bank voltage (Vtg). Blank: the packs' mean. |
 | `entity_current`            | entity or template | — | Bank current (Cur). Blank: the packs' sum. |
 | `entity_power`              | entity or template | — | Bank power, in W or kW (Pwr). Blank: voltage × current. |
 | `entity_capacity_remaining` | entity or template | — | Bank remaining capacity (Rem-Capacity). Blank: the packs' sum. |
+| `entity_capacity_total`     | entity or template | — | Bank total capacity (Bat-Capacity). Blank: the packs' sum. |
+| `nominal_voltage`           | number  | —              | Voltage used to turn a bank capacity in Ah into kWh (with `capacity_unit: kWh`). Blank: the packs' mean nominal voltage, or without packs the bank voltage. |
 
 The bank totals show on a **bank display** built into the top of the cabinet, styled after the JK BMS screen: voltage and current on top, the SOC in a ring next to the bank's total and remaining capacity, and below that the highest and lowest cell, the warmest temperature, the power in kW, the alarm state, the number of packs and the charge / discharge switches.
+
+**Display only.** A stacked card without packs shows just the display, from the bank entities you set: handy as one overview of all your stacks together, above cards that each show one stack. In the editor, leave the packs out and fill in the bank totals; set `entity_capacity_total` for Bat-Capacity, since there are no packs to add up.
 
 Everything you don't set is worked out from the packs where that adds up: voltage is the packs' mean (they're in parallel), current and capacities are their sums, SOC is weighted by capacity, cells and temperature are the extremes over all packs. Alarm is red when any pack is in alarm, and CHG / DCH show `ON`, `OFF`, or for example `7/8` when one pack has its switch off. The ring is green above 50 %, orange above 20 % and red below, like the packs' bars. Turn the display off with `show_bank_display: false`.
 

@@ -15,7 +15,7 @@
  * Click any element to open the matching entity's more-info dialog.
  */
 
-const VERSION = "1.9.0-alpha.1";
+const VERSION = "1.9.0-alpha.2";
 
 const DEFAULTS = {
   name: "",
@@ -145,6 +145,9 @@ const ADVANCED_SECTIONS = [
   },
   {
     title: "Temperatures",
+    // On a JK BMS the third battery temperature (register 0xF8) is the MOS
+    // sensor again; the JK app leaves it out and shows T1, T2, T4 and T5.
+    hint: "JK BMS: battery temperature 3 is the same sensor as the MOS temperature. If your integration has five battery temperatures, use 1, 2, 4 and 5 for probes 1–4.",
     schema: [
       { name: "entity_temp_mos",     selector: ENT_SENSOR },
       { name: "entity_temp_probe_1", selector: ENT_SENSOR },
@@ -1924,7 +1927,7 @@ class BatteryPackCardEditor extends HTMLElement {
 
     this._advForms = [];
     for (const section of ADVANCED_SECTIONS) {
-      this._appendAdvSection(section.title, section.schema);
+      this._appendAdvSection(section.title, section.schema, null, section.hint);
     }
     // Placeholder; the per-cell sections are rebuilt whenever `cells` changes.
     this._cellSlot = document.createElement("div");
@@ -1933,12 +1936,18 @@ class BatteryPackCardEditor extends HTMLElement {
     this._lastCellsN = -1;
   }
 
-  _appendAdvSection(title, schema, parent) {
+  _appendAdvSection(title, schema, parent, hint) {
     parent = parent || this._advPane;
     const h = document.createElement("div");
     h.className = "bpc-section-title";
     h.textContent = title;
     parent.appendChild(h);
+    if (hint) {
+      const note = document.createElement("div");
+      note.className = "bpc-hint";
+      note.textContent = hint;
+      parent.appendChild(note);
+    }
 
     // Sections made of entity fields get our own rows, so each field can
     // carry an entity/template toggle next to it (ha-form has no room for one).
@@ -1975,6 +1984,9 @@ class BatteryPackCardEditor extends HTMLElement {
     const row = document.createElement("div");
     row.className = "bpc-ent";
     const sel = document.createElement("ha-selector");
+    // Not required: HA then shows its ✕ to clear the field, instead of
+    // leaving YAML or the { } switch as the only way to empty it.
+    sel.required = false;
     const btn = document.createElement("button");
     btn.type = "button";
     btn.className = "bpc-tpl";
