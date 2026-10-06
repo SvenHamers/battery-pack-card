@@ -15,7 +15,7 @@
  * Click any element to open the matching entity's more-info dialog.
  */
 
-const VERSION = "1.9.0-alpha.2";
+const VERSION = "1.9.0-alpha.3";
 
 const DEFAULTS = {
   name: "",
@@ -26,6 +26,9 @@ const DEFAULTS = {
   show_stats: true,
   show_pills: true,
   show_cells: true,
+  // The resistance line in each cell tile. It's hidden anyway when there are
+  // no resistance sensors (e.g. a Seplos BMS), unless show_missing is on.
+  show_cell_resistance: true,
   show_summary: true,
   show_temperatures: true,
   cell_voltage_from: "V",
@@ -89,6 +92,7 @@ const BASIC_SCHEMA = [
       { name: "show_stats",        selector: { boolean: {} } },
       { name: "show_pills",        selector: { boolean: {} } },
       { name: "show_cells",        selector: { boolean: {} } },
+      { name: "show_cell_resistance", selector: { boolean: {} } },
       { name: "show_summary",      selector: { boolean: {} } },
       { name: "show_temperatures", selector: { boolean: {} } },
       { name: "show_info",         selector: { boolean: {} } },
@@ -278,6 +282,7 @@ const LABELS = {
   show_stats: "Stats grid",
   show_pills: "Status pills",
   show_cells: "Cell array",
+  show_cell_resistance: "Cell resistance",
   show_summary: "Min/Max summary",
   show_temperatures: "Temperatures",
   entity_soc: "State of charge",
@@ -1396,6 +1401,12 @@ class BatteryPackCard extends HTMLElement {
     // on a BMS without a heater is misleading.
     const showMissing = cfg.show_missing === true || cfg.show_missing === "true";
     const shown = (eid) => showMissing || this._exists(eid);
+    // Resistance in the cell tiles: switched on, and at least one cell has a
+    // resistance sensor (or show_missing). A Seplos BMS, for one, has none.
+    let showR = cfg.show_cell_resistance !== false && cfg.show_cell_resistance !== "false" && showMissing;
+    if (!showR && cfg.show_cell_resistance !== false && cfg.show_cell_resistance !== "false") {
+      for (let n = 1; n <= cfg.cells && !showR; n++) showR = this._exists(this._cellEntity("r", n));
+    }
     const showPill = (key, ...eids) => cfg[`show_pill_${key}`] !== false && cfg[`show_pill_${key}`] !== "false" && eids.some(shown);
     const pills = [
       showPill("charge", E.chg)    ? this._pill("Charge",    chgOn ? "ON" : "OFF", chgOn ? "on" : "off", E.chg) : "",
@@ -1455,8 +1466,8 @@ class BatteryPackCard extends HTMLElement {
       <div class="pills">${pills}</div>` : ""}
 
       ${cfg.show_cells ? `
-        <div class="section-label">CELLS — voltage and resistance, colour = mV from pack avg (${dev.soft}/${dev.warn}/${dev.bad})</div>
-        <div class="cells${maxRed ? " max-red" : ""}" style="--cell-min-w:${intOr(cfg.cells_min_width, 48)}px;--cell-max-cols:${Math.max(1, intOr(cfg.cells_max_columns, 8))}">${this._renderCells(cfg.cells, vAvg, minCell, maxCell, vSc, vDec, rSc, rDec, dev)}</div>` : ""}
+        <div class="section-label">CELLS — voltage${showR ? " and resistance" : ""}, colour = mV from pack avg (${dev.soft}/${dev.warn}/${dev.bad})</div>
+        <div class="cells${maxRed ? " max-red" : ""}" style="--cell-min-w:${intOr(cfg.cells_min_width, 48)}px;--cell-max-cols:${Math.max(1, intOr(cfg.cells_max_columns, 8))}">${this._renderCells(cfg.cells, vAvg, minCell, maxCell, vSc, vDec, rSc, rDec, dev, showR)}</div>` : ""}
 
       ${cfg.show_summary ? `
         <div class="cell-summary">
@@ -1543,7 +1554,7 @@ class BatteryPackCard extends HTMLElement {
     return `<span class="pill pill-${status}" ${this._dataE(entityId)} role="button">${this._esc(label)} <b>${this._esc(value)}</b></span>`;
   }
 
-  _renderCells(N, vAvg, minCell, maxCell, vSc, vDec, rSc, rDec, dev) {
+  _renderCells(N, vAvg, minCell, maxCell, vSc, vDec, rSc, rDec, dev, showR = true) {
     let out = "";
     for (let n = 1; n <= N; n++) {
       const ev = this._cellEntity("v", n);
@@ -1560,7 +1571,7 @@ class BatteryPackCard extends HTMLElement {
         <div class="cell ${cls} ${tag}" ${this._dataE(ev)} role="button">
           <div class="cell-n">#${n}</div>
           <div class="cell-v">${fmt(v, vDec)}</div>
-          <div class="cell-r">${fmt(r * 1000, rDec)} mΩ</div>
+          ${showR ? `<div class="cell-r">${fmt(r * 1000, rDec)} mΩ</div>` : ""}
         </div>
       `;
     }

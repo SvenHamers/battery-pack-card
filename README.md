@@ -72,6 +72,7 @@ If you use the JK-BMS RS485 addon, `prefix` is the only required field.
 | `show_stats`        | bool    | `true`                      | Show the stat tiles (voltage, current, power, balance, cycles, phase). Tiles whose sensor doesn't exist are hidden; without a power sensor, power is voltage × current. |
 | `show_pills`        | bool    | `true`                      | Show charge / discharge / balance / heater status pills. Pills whose sensor doesn't exist are hidden; each can also be switched off, see [Status pills](#status-pills). |
 | `show_cells`        | bool    | `true`                      | Show the per-cell voltage + resistance grid.                  |
+| `show_cell_resistance` | bool | `true`                    | Show the internal resistance under each cell's voltage. Hidden anyway when your BMS has no resistance sensors (e.g. Seplos), unless `show_missing` is on. |
 | `show_summary`      | bool    | `true`                      | Show the min / avg / max / Δ summary line.                    |
 | `show_temperatures` | bool    | `true`                      | Show the temperature strip (MOSFET + up to 4 probes). Tiles whose sensor doesn't exist are hidden. |
 | `show_missing`      | bool    | `false`                     | Also show tiles, pills and lines for sensors that don't exist (as `0`, `OFF` or `—`), the way the card worked before 1.8. Off: they're hidden. |
