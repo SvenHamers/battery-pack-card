@@ -18,7 +18,7 @@
  */
 
 (() => {
-const VERSION = "1.9.0-alpha.3";
+const VERSION = "1.9.0-alpha.4";
 if (customElements.get("battery-stacked-pack-card")) return;
 
 const DEFAULTS = {
@@ -57,6 +57,28 @@ const TOTALS = [
   ["entity_power",              "POWER",     "W",   "W",  0, true],
   ["entity_capacity_total",     "CAPACITY",  "Cap", "Ah", 0, false],
 ];
+
+// More display values, mainly for display-only cards (no packs to work them
+// out from): [config key, entity domain for the picker, or null for any].
+// Set on a card with packs, they take priority like the totals above.
+const EXTRAS = [
+  ["entity_cell_max", "sensor"],
+  ["entity_cell_min", "sensor"],
+  ["entity_temperature", "sensor"],
+  ["entity_alarm", null],
+  ["entity_pack_count", "sensor"],
+  ["entity_charge", null],
+  ["entity_discharge", null],
+];
+// A state read as on / off: on, true, a non-zero number, or (for alarms) any
+// text other than an all-clear like "Normal".
+const isOn = (state, alarm = false) => {
+  const v = String(state ?? "").trim().toLowerCase();
+  if (/^(on|true|yes|problem|alarm|warning)$/.test(v)) return true;
+  if (/^(off|false|no|ok|normal|none|no alarm|unavailable|unknown|)$/.test(v)) return false;
+  const n = parseFloat(v);
+  return Number.isFinite(n) ? n > 0 : alarm;
+};
 
 const fmt = (n, d = 0, signed = false) => {
   if (n === null || n === undefined || Number.isNaN(n)) return "—";
@@ -157,7 +179,7 @@ class BatteryStackedPackCard extends HTMLElement {
   _syncTemplates() {
     this._tpl = this._tpl || new TemplateSubs(() => this._queue());
     const c = this._config || {}, conn = this._hass && this._hass.connection;
-    const want = new Set(this.isConnected && conn ? TOTALS.map(([k]) => c[k]).filter(isTpl) : []);
+    const want = new Set(this.isConnected && conn ? [...TOTALS, ...EXTRAS].map(([k]) => c[k]).filter(isTpl) : []);
     this._tpl.sync(conn, want);
   }
 
@@ -414,7 +436,7 @@ class BatteryStackedPackCard extends HTMLElement {
       if (key === "entity_power" && Number.isFinite(n)) n *= /^kW$/i.test(t.unit || "") ? 1000 : /^MW$/i.test(t.unit || "") ? 1e6 : 1;
       T[key] = { ...t, n };
     }
-    if (!packs.length && !Object.keys(T).length) return "";
+    if (!packs.length && !Object.keys(T).length && !EXTRAS.some(([k]) => c[k])) return "";
     const vals = (k) => packs.map((p) => p[k]).filter(fin);
     const sum = (k) => { const v = vals(k); return v.length ? v.reduce((a, b) => a + b, 0) : null; };
     const mean = (k) => { const v = vals(k); return v.length ? v.reduce((a, b) => a + b, 0) / v.length : null; };
@@ -444,19 +466,30 @@ class BatteryStackedPackCard extends HTMLElement {
     const capUnit = kwh ? "kWh" : "Ah";
     const vxa = V && A && Number.isFinite(V.n) && Number.isFinite(A.n) && V.text === null && A.text === null ? V.n * A.n : null;
     const PWR = pick("entity_power", vxa !== null ? vxa : sum("power"));
-    const cellMax = vals("cellMax").length ? Math.max(...vals("cellMax")) : null;
-    const cellMin = vals("cellMin").length ? Math.min(...vals("cellMin")) : null;
+    // Extra display entities, set: they win over what the packs give.
+    const X = {};
+    for (const [key] of EXTRAS) { const t = this._total(c[key], st); if (t) X[key] = t; }
+    const xNum = (key) => { const t = X[key]; const n = t && t.text === null ? parseFloat(t.value) : NaN; return Number.isFinite(n) ? n : null; };
+    const xState = (key) => { const t = X[key]; return t ? (t.text !== null ? t.text : t.value) : undefined; };
+    const cellV = (n) => (n === null ? null : n > 100 ? n / 1000 : n);   // mV sensors read as V
+    const cellMax = X.entity_cell_max ? cellV(xNum("entity_cell_max")) : vals("cellMax").length ? Math.max(...vals("cellMax")) : null;
+    const cellMin = X.entity_cell_min ? cellV(xNum("entity_cell_min")) : vals("cellMin").length ? Math.min(...vals("cellMin")) : null;
     const temps = packs.map((p) => p.temp && p.temp.shown).filter(fin);
-    const temp = temps.length ? Math.max(...temps) : null;
-    const watched = packs.filter((p) => p.alarm !== null);
-    const alarms = watched.filter((p) => p.alarm).length;
+    const temp = X.entity_temperature ? xNum("entity_temperature") : temps.length ? Math.max(...temps) : null;
+    const watchedPacks = packs.filter((p) => p.alarm !== null);
+    const watched = X.entity_alarm ? [true] : watchedPacks;
+    const alarms = X.entity_alarm ? (isOn(xState("entity_alarm"), true) ? 1 : 0) : watchedPacks.filter((p) => p.alarm).length;
+    const alarmText = X.entity_alarm ? "Alarm" : alarms === 1 ? "1 pack" : `${alarms} packs`;
     const sw = (k) => {
+      const key = k === "charge" ? "entity_charge" : "entity_discharge";
+      if (X[key]) return isOn(xState(key)) ? ["ON", ""] : ["OFF", "red"];
       const known = packs.filter((p) => p[k] !== null);
       if (!known.length) return null;
       const on = known.filter((p) => p[k]).length;
       return on === known.length ? ["ON", ""] : on === 0 ? ["OFF", "red"] : [`${on}/${known.length}`, "amber"];
     };
     const chg = sw("charge"), dch = sw("discharge");
+    const packCount = X.entity_pack_count ? xNum("entity_pack_count") : this._packCfgs.length || null;
 
     const attrs = (t) => `${t && t.entity ? ` data-entity="${esc(t.entity)}" role="button"` : ""}${t && t.error ? ` title="${esc(t.error)}"` : ""}`;
     const show = (t, d, unit, scale = 1) => (t.text !== null ? esc(t.text) : `${fmt(Number.isFinite(t.n) ? t.n / scale : NaN, d)}${unit}`);
@@ -475,24 +508,27 @@ class BatteryStackedPackCard extends HTMLElement {
     ].join("");
     const col = (a, b) => (a || b ? `<div class="col">${a}${b}</div>` : "");
     const bot = [
-      col(item("Max.Cell:", cellMax === null ? null : `${fmt(cellMax, 3)}V`), item("Min.Cell:", cellMin === null ? null : `${fmt(cellMin, 3)}V`)),
-      col(item("Temp:", temp === null ? null : `${fmt(temp, 0)}°`), PWR ? item("Pwr(kW):", show(PWR, 2, "", 1000), PWR) : ""),
-      col(watched.length ? item("Alarm:", alarms ? "Alarm" : "Normal", null, alarms ? "red" : "") : "", this._packCfgs.length ? item("Packs:", String(this._packCfgs.length)) : ""),
-      col(chg ? item("CHG:", chg[0], null, chg[1]) : "", dch ? item("DCH:", dch[0], null, dch[1]) : ""),
+      col(item("Max.Cell:", cellMax === null ? null : `${fmt(cellMax, 3)}V`, X.entity_cell_max), item("Min.Cell:", cellMin === null ? null : `${fmt(cellMin, 3)}V`, X.entity_cell_min)),
+      col(item("Temp:", temp === null ? null : `${fmt(temp, 0)}°`, X.entity_temperature), PWR ? item("Pwr(kW):", show(PWR, 2, "", 1000), PWR) : ""),
+      col(watched.length ? item("Alarm:", alarms ? "Alarm" : "Normal", X.entity_alarm, alarms ? "red" : "") : "", packCount ? item("Packs:", fmt(packCount, 0), X.entity_pack_count) : ""),
+      col(chg ? item("CHG:", chg[0], X.entity_charge, chg[1]) : "", dch ? item("DCH:", dch[0], X.entity_discharge, dch[1]) : ""),
     ].filter(Boolean);
     if (!top && !mid && !bot.length) return "";
     if (c.bank_display_size === "compact") {
-      // One slim line: a small ring and the headline figures.
-      const items = [
-        V ? item("Vtg:", show(V, 2, "V"), V) : "",
-        A ? item("Cur:", show(A, 1, "A"), A) : "",
-        PWR ? item("Pwr:", show(PWR, 2, "kW", 1000), PWR) : "",
-        REM ? item("Rem:", REM.text !== null ? esc(REM.text) : `${fmt(REM.n, capDec(REM.n || 0))}${capUnit}`, REM) : "",
-        alarms ? item("Alarm:", alarms === 1 ? "1 pack" : `${alarms} packs`, null, "red") : "",
+      // Always the same shape: the SOC ring on the left, the four headline
+      // figures 2 × 2 on the right as "Vtg: 53.39V", all scaling with the
+      // display's width; an alarm gets its own line underneath.
+      const cell = (label, html, t) => (html === null ? "" : `<span class="c"${attrs(t)}><span class="k">${label}:</span><span class="v">${html}</span></span>`);
+      const cells = [
+        V ? cell("Vtg", show(V, 2, "V"), V) : "",
+        A ? cell("Cur", show(A, 1, "A"), A) : "",
+        PWR ? cell("Pwr", show(PWR, 2, "kW", 1000), PWR) : "",
+        REM ? cell("Rem", REM.text !== null ? esc(REM.text) : `${fmt(REM.n, capDec(REM.n || 0))}${capUnit}`, REM) : "",
       ].join("");
       return `<div class="jk compact">
         ${SOC ? `<div class="ring sm"${attrs(SOC)}><span class="arc" style="background:${socN === null ? "#1c1c1c" : ringGradient(socN)}"></span><span class="pct">${SOC.text !== null ? esc(SOC.text) : `${fmt(socN === null ? NaN : socN, 0)}%`}</span></div>` : ""}
-        ${items ? `<div class="line">${items}</div>` : ""}
+        ${cells ? `<div class="grid4">${cells}</div>` : ""}
+        ${alarms ? `<div class="alarmline"${attrs(X.entity_alarm)}>Alarm: <span class="v red">${esc(alarmText)}</span></div>` : ""}
       </div>`;
     }
     return `<div class="jk">
@@ -722,14 +758,17 @@ const CSS = `
   /* Display only (no packs): the bezel is the whole device */
   #rack.no-packs .mounted { border-radius: 10px; border-bottom: 1px solid rgba(255,255,255,0.08); }
 
-  /* Compact display: one slim line */
-  .jk.compact { display: flex; align-items: center; gap: 12px; padding: 8px 12px; }
-  .jk.compact .ring.sm { flex: none; width: 52px; height: 52px; }
-  .jk.compact .ring.sm .arc { -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 8px), #000 calc(100% - 7.5px));
-                                      mask: radial-gradient(farthest-side, transparent calc(100% - 8px), #000 calc(100% - 7.5px)); }
-  .jk.compact .ring.sm .pct { inset: 8px; font-size: 13px; }
-  .jk.compact .line { flex: 1; display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 14px; font-size: 13px; white-space: nowrap; }
-  .jk.compact .line .v { font-size: 17px; }
+  /* Compact display: ring left, 2 × 2 figures right, scaling with the width */
+  .jk.compact { display: grid; grid-template-columns: auto 1fr; align-items: center; column-gap: clamp(6px, 5cqw, 28px); row-gap: 4px; padding: 8px clamp(8px, 4cqw, 12px); }
+  .jk.compact .ring.sm { width: clamp(36px, 16cqw, 76px); height: clamp(36px, 16cqw, 76px); }
+  .jk.compact .ring.sm .arc { -webkit-mask: radial-gradient(farthest-side, transparent 72%, #000 73%);
+                                      mask: radial-gradient(farthest-side, transparent 72%, #000 73%); }
+  .jk.compact .ring.sm .pct { inset: 18%; font-size: clamp(9px, 4cqw, 17px); }
+  .jk.compact .grid4 { display: grid; grid-template-columns: auto auto; justify-content: space-between; align-items: baseline; gap: clamp(2px, 1.6cqw, 10px) clamp(6px, 3cqw, 24px); min-width: 0; }
+  .jk.compact .c { display: flex; align-items: baseline; gap: clamp(2px, 0.8cqw, 5px); min-width: 0; white-space: nowrap; }
+  .jk.compact .c .k { font-size: clamp(8px, 3.4cqw, 15px); }
+  .jk.compact .c .v { margin: 0; font-size: clamp(9.5px, 5.2cqw, 24px); overflow: hidden; text-overflow: ellipsis; }
+  .jk.compact .alarmline { grid-column: 1 / -1; font-size: clamp(11px, 3.4cqw, 14px); }
 
   /* The display itself, after the JK BMS screen: black, white labels, light
      green figures (sampled from the JK screen), the SOC ring. */
@@ -846,6 +885,13 @@ const LABELS = {
   bank_display_size: "Bank display",
   nominal_voltage: "Nominal voltage for kWh (blank = from the packs)",
   entity_capacity_total: "Bank total capacity",
+  entity_cell_max: "Highest cell voltage",
+  entity_cell_min: "Lowest cell voltage",
+  entity_temperature: "Temperature",
+  entity_alarm: "Alarm (on / non-zero / a warning text = alarm)",
+  entity_pack_count: "Number of packs",
+  entity_charge: "Charge switch (CHG)",
+  entity_discharge: "Discharge switch (DCH)",
   entity_soc: "Bank SOC",
   entity_voltage: "Bank voltage",
   entity_current: "Bank current",
@@ -980,6 +1026,11 @@ class BatteryStackedPackCardEditor extends HTMLElement {
         <div class="bspc-title">Bank totals</div>
         <div class="bspc-hint">Optional, for the bank display on top of the cabinet. A field left empty is worked out from the packs where possible (voltage, current, SOC, power, remaining capacity). Use { } next to a field to enter a template instead of an entity, e.g. to add up several stacks.</div>
         <div class="bspc-form-totals"></div>
+        <div class="bspc-extras">
+          <div class="bspc-title">More display values</div>
+          <div class="bspc-hint">For a card without packs, so the display can show these too. With packs they're worked out from the packs; set here they take priority.</div>
+          <div class="bspc-form-extras"></div>
+        </div>
       </div>
       <div class="bspc-pack">
         <div class="bspc-tools">
@@ -1008,6 +1059,9 @@ class BatteryStackedPackCardEditor extends HTMLElement {
     });
     const totals = this.querySelector(".bspc-form-totals");
     for (const [name] of TOTALS) totals.appendChild(this._totalRow(name));
+    const extras = this.querySelector(".bspc-form-extras");
+    extras.style.cssText = "display:grid;gap:8px";
+    for (const [name, domain] of EXTRAS) extras.appendChild(this._totalRow(name, domain === null ? { entity: {} } : { entity: { domain } }));
 
     this._tabs.addEventListener("click", (e) => {
       const t = e.target.closest(".bspc-tab");
@@ -1036,7 +1090,7 @@ class BatteryStackedPackCardEditor extends HTMLElement {
 
   // Bank totals: an entity picker, or (after { }) a template editor, as in
   // the pack card's editor.
-  _totalRow(name) {
+  _totalRow(name, entSel = ENT) {
     const row = document.createElement("div");
     row.className = "bspc-ent";
     const sel = document.createElement("ha-selector");
@@ -1048,7 +1102,7 @@ class BatteryStackedPackCardEditor extends HTMLElement {
     btn.className = "bspc-tpl";
     btn.textContent = "{ }";
     row.append(sel, btn);
-    const rec = { name, sel, btn, mode: null };
+    const rec = { name, sel, btn, mode: null, entSel };
     sel.addEventListener("value-changed", (ev) => { ev.stopPropagation(); this._setField(name, ev.detail.value); });
     btn.addEventListener("click", () => this._toggleTemplate(name));
     this._totRows.push(rec);
@@ -1085,12 +1139,16 @@ class BatteryStackedPackCardEditor extends HTMLElement {
   }
 
   _updateTotalRows() {
+    // The extra display values only matter without packs; keep them visible
+    // when one is set anyway, so it can still be cleared.
+    const ex = this.querySelector(".bspc-extras");
+    if (ex) ex.hidden = this._config.packs.length > 0 && !EXTRAS.some(([k]) => this._config[k]);
     for (const r of this._totRows) {
       const tpl = this._isTemplateMode(r.name);
       r.sel.hass = this._hass;
       if (r.mode !== tpl) {   // only swap the inner selector when the mode flips
         r.mode = tpl;
-        r.sel.selector = tpl ? { template: {} } : ENT;
+        r.sel.selector = tpl ? { template: {} } : r.entSel;
         r.btn.classList.toggle("on", tpl);
         r.btn.setAttribute("aria-pressed", String(tpl));
         r.btn.title = tpl ? "Use an entity instead" : "Use a template instead of an entity";

@@ -15,7 +15,7 @@
  * Click any element to open the matching entity's more-info dialog.
  */
 
-const VERSION = "1.9.0-alpha.3";
+const VERSION = "1.9.0-alpha.4";
 
 const DEFAULTS = {
   name: "",

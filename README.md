@@ -308,7 +308,7 @@ Each pack's screen shows its SOC (with a bar), voltage, current, cell Δ and its
 | `highlight_soc`             | bool    | `true`         | Red border on the lowest and green border on the highest SOC pack. `false` turns both off. In the editor: *Red / green border on lowest / highest SOC pack*. |
 | `show_legend`               | bool    | `true`         | Colour legend under the cabinet. |
 | `show_bank_display`         | bool    | `true`         | The bank display on top of the cabinet. |
-| `bank_display_size`         | string  | `full`         | `full`: the JK-style screen. `compact`: one slim line with a small SOC ring, voltage, current, power and remaining capacity (and the alarm, when a pack is in alarm). |
+| `bank_display_size`         | string  | `full`         | `full`: the JK-style screen. `compact`: a slim strip, always the same shape: the SOC ring on the left, voltage, current, power and remaining capacity 2 × 2 on the right, scaling with the card's width; an alarm gets its own line underneath. |
 | `capacity_unit`             | string  | `Ah`           | `Ah` or `kWh`, for the display's Bat- and Rem-Capacity, and for the packs' own cards unless a pack (or `pack_defaults`) sets its own. kWh uses each pack's nominal voltage (see the pack card's `nominal_voltage`). |
 | `entity_soc`                | entity or template | — | Bank SOC, in the ring. Blank: worked out from the packs. |
 | `entity_voltage`            | entity or template | — | Bank voltage (Vtg). Blank: the packs' mean. |
@@ -320,7 +320,19 @@ Each pack's screen shows its SOC (with a bar), voltage, current, cell Δ and its
 
 The bank totals show on a **bank display** built into the top of the cabinet, styled after the JK BMS screen: voltage and current on top, the SOC in a ring next to the bank's total and remaining capacity, and below that the highest and lowest cell, the warmest temperature, the power in kW, the alarm state, the number of packs and the charge / discharge switches.
 
-**Display only.** A stacked card without packs shows just the display, from the bank entities you set: handy as one overview of all your stacks together, above cards that each show one stack. In the editor, leave the packs out and fill in the bank totals; set `entity_capacity_total` for Bat-Capacity, since there are no packs to add up.
+**Display only.** A stacked card without packs shows just the display, from the bank entities you set: handy as one overview of all your stacks together, above cards that each show one stack. In the editor, leave the packs out and fill in the bank totals; set `entity_capacity_total` for Bat-Capacity, since there are no packs to add up. For the rest of the full display there are more bank fields, which the editor shows under *More display values* when the card has no packs:
+
+| Option               | Type                | Description |
+| -------------------- | ------------------- | ----------- |
+| `entity_cell_max`    | entity or template  | Highest cell voltage (Max.Cell), in V or mV. |
+| `entity_cell_min`    | entity or template  | Lowest cell voltage (Min.Cell), in V or mV. |
+| `entity_temperature` | entity or template  | Temperature (Temp). |
+| `entity_alarm`       | entity or template  | Alarm: `on`, `true`, a non-zero number or a warning text shows **Alarm** in red; off, `0` or `Normal` shows **Normal**. |
+| `entity_pack_count`  | entity or template  | Number of packs (Packs). |
+| `entity_charge`      | entity or template  | Charge switch (CHG): `ON` / `OFF`. |
+| `entity_discharge`   | entity or template  | Discharge switch (DCH): `ON` / `OFF`. |
+
+On a card with packs these are worked out from the packs; set them anyway and they take priority, like the bank totals.
 
 Everything you don't set is worked out from the packs where that adds up: voltage is the packs' mean (they're in parallel), current and capacities are their sums, SOC is weighted by capacity, cells and temperature are the extremes over all packs. Alarm is red when any pack is in alarm, and CHG / DCH show `ON`, `OFF`, or for example `7/8` when one pack has its switch off. The ring is green above 50 %, orange above 20 % and red below, like the packs' bars. Turn the display off with `show_bank_display: false`.
 
