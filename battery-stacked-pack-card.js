@@ -18,7 +18,7 @@
  */
 
 (() => {
-const VERSION = "1.9.0-alpha.4";
+const VERSION = "1.9.0";
 if (customElements.get("battery-stacked-pack-card")) return;
 
 const DEFAULTS = {
