@@ -18,7 +18,7 @@
  */
 
 (() => {
-const VERSION = "1.9.0";
+const VERSION = "2.0.0-alpha.1";
 if (customElements.get("battery-stacked-pack-card")) return;
 
 const DEFAULTS = {
@@ -134,6 +134,7 @@ const socColor = (s) => (s > 50 ? "var(--clr-green)" : s > 20 ? "var(--clr-orang
 const packConfigs = (cfg) => (Array.isArray(cfg.packs) ? cfg.packs : []).map((p, i) => {
   const c = { capacity_unit: cfg.capacity_unit, ...(cfg.pack_defaults || {}), ...(p || {}) };
   if (!c.name) c.name = `Pack ${i + 1}`;
+  delete c.alerts;   // the stacked card owns the alerts
   return c;
 });
 
@@ -270,8 +271,22 @@ class BatteryStackedPackCard extends HTMLElement {
     this._dlg = r.getElementById("dlg");
 
     this._head.addEventListener("click", (e) => {
-      const t = e.composedPath().find((n) => n.dataset && n.dataset.entity);
+      const path = e.composedPath();
+      if (path.some((n) => n.classList && n.classList.contains("bpc-pop"))) return;
+      if (path.some((n) => n.dataset && n.dataset.action === "alerts")) {
+        this._alertsOpen = !this._alertsOpen;
+        this._headHtml = null;
+        return this._render();
+      }
+      const t = path.find((n) => n.dataset && n.dataset.entity);
       if (t) this._moreInfo(t.dataset.entity);
+    });
+    // Any other click closes the alerts popover.
+    this.shadowRoot.addEventListener("click", (e) => {
+      if (!this._alertsOpen || e.composedPath().some((n) => n === this._head)) return;
+      this._alertsOpen = false;
+      this._headHtml = null;
+      this._render();
     });
     this._cab.addEventListener("click", (e) => {
       const path = e.composedPath();
@@ -405,6 +420,29 @@ class BatteryStackedPackCard extends HTMLElement {
       </span>`;
   }
 
+  // Alerts: the stacked card owns them for all of its packs (the pack cards
+  // it draws don't), using the pack card's alerts module.
+  _alertsHtml(sums) {
+    const c = this._config;
+    const Pack = customElements.get("battery-pack-card");
+    const A = Pack && Pack.alerts;
+    if (!A || !c.alerts || this._incompatible) return "";
+    if (!this._alertsCss) {
+      this._alertsCss = true;
+      const st = document.createElement("style");
+      st.textContent = A.css;
+      this.shadowRoot.appendChild(st);
+    }
+    this._alertSync = this._alertSync || new A.Sync(() => { this._headHtml = null; this._queue(); });
+    this._alertSync.tick(this, this._hass, c, () => (this._sources || []).map((s) => s.alertInputs()).filter(Boolean));
+    if (!c.alerts.enabled) return "";
+    const first = this._sources && this._sources[0] && this._sources[0].alertInputs();
+    const status = A.status(c, sums, first && first.bands);
+    const admin = this._hass && this._hass.user && this._hass.user.is_admin === true;
+    const st = this._alertSync.state;
+    return `<span class="bpc-bellwrap">${A.bell(status, st, admin)}${this._alertsOpen ? A.popover(status, st, c, esc) : ""}</span>`;
+  }
+
   _renderHead(sums) {
     const c = this._config;
     const watched = sums.filter((s) => s && s.alarm !== null);
@@ -413,7 +451,7 @@ class BatteryStackedPackCard extends HTMLElement {
       ? `<div class="alarm ${alarms ? "alert" : "ok"}"><span class="dot"></span>${alarms ? `${alarms} pack${alarms > 1 ? "s" : ""} in alarm` : "All packs normal"}</div>`
       : "";
     return `
-      <div class="s-head"><div class="s-title">${esc(c.name)}</div>${pill}</div>
+      <div class="s-head"><div class="s-title">${esc(c.name)}</div><div class="s-hr">${this._alertsHtml(sums)}${pill}</div></div>
       ${this._incompatible ? `<div class="empty warn">An older Battery Pack Card is loaded in this browser, from a second dashboard resource or bundled with an integration, and the stacked card needs v${VERSION} or newer. Remove the extra copy so only the HACS one loads, then reload.</div>` : ""}
       ${this._packCfgs.length || this._dispHtml ? "" : `<div class="empty">No packs yet. Add them in the card editor, or under <code>packs:</code> in YAML.</div>`}`;
   }
@@ -576,6 +614,7 @@ class BatteryStackedPackCard extends HTMLElement {
 
   _makeDetail(i) {
     const card = document.createElement("battery-pack-card");
+    card._noAlerts = true;
     card.setConfig(this._packCfgs[i]);
     if (this._hass) card.hass = this._hass;
     this._detailCard = card;
@@ -644,6 +683,7 @@ const CSS = `
   ha-card { display: block; padding: 18px 18px 14px; container-type: inline-size; }
   [data-entity] { cursor: pointer; }
   .s-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 12px; }
+  .s-hr { display: flex; align-items: center; gap: 4px; }
   .s-title { font-size: 20px; font-weight: 600; letter-spacing: 0.3px; }
   .s-head .alarm { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 500; padding: 4px 12px; border-radius: 14px; white-space: nowrap; }
   .s-head .alarm.ok    { color: var(--clr-green); background: rgba(76,175,80,0.13); }
@@ -902,7 +942,7 @@ const LABELS = {
 class BatteryStackedPackCardEditor extends HTMLElement {
   constructor() {
     super();
-    this._tab = -1;   // -1 = Bank, otherwise a pack index
+    this._tab = -1;   // -1 = Bank, -2 = Alerts, otherwise a pack index
     this._totRows = [];            // bank totals: entity-or-template fields
     this._tplForced = new Set();   // switched to template mode but still empty
     this._tplStash = {};           // templates set aside when switching back to an entity
@@ -937,9 +977,38 @@ class BatteryStackedPackCardEditor extends HTMLElement {
     if (!this._hass || !this._config) return;
     if (!this._mounted) this._mount();
     this._renderTabs();
-    const bank = this._tab < 0;
+    const bank = this._tab === -1, alerts = this._tab === -2;
     this._bankPane.hidden = !bank;
-    this._packPane.hidden = bank;
+    this._packPane.hidden = this._tab < 0;
+    this._alertsPane.hidden = !alerts;
+    if (alerts) {
+      this._packEditor = null;
+      this._packSlot.innerHTML = "";
+      this._packEditorFor = -1;
+      if (!customElements.get("battery-pack-card-alerts-editor")) {
+        this._alertsPane.textContent = "Alerts need battery-pack-card.js v2 or newer.";
+        return;
+      }
+      if (!this._alertsEd) {
+        this._alertsEd = document.createElement("battery-pack-card-alerts-editor");
+        this._alertsEd.addEventListener("alerts-changed", (e) => { e.stopPropagation(); this._dispatch({ ...this._config, alerts: e.detail.alerts }); });
+        this._alertsPane.appendChild(this._alertsEd);
+      }
+      // Headless pack cards, as the card itself uses, so the alerts cover the
+      // same entities; rebuilt when the packs change.
+      const Pack = customElements.get("battery-pack-card");
+      const cfgs = packConfigs({ ...DEFAULTS, ...this._config });
+      const sig = JSON.stringify(cfgs);
+      if (sig !== this._alertSrcSig) {
+        this._alertSrcSig = sig;
+        this._alertSrcs = cfgs.map((c) => Pack.summarySource(c, () => {}));
+      }
+      this._alertSrcs.forEach((src) => { src.hass = this._hass; });
+      this._alertsEd.inputs = () => this._alertSrcs.map((src) => src.alertInputs()).filter(Boolean);
+      this._alertsEd.config = this._config;
+      this._alertsEd.hass = this._hass;
+      return;
+    }
     if (bank) {
       this._packEditor = null;
       this._packSlot.innerHTML = "";
@@ -964,6 +1033,7 @@ class BatteryStackedPackCardEditor extends HTMLElement {
         return;
       }
       const ed = document.createElement("battery-pack-card-editor");
+      ed._noAlerts = true;   // the alerts are set for the whole stack
       ed.addEventListener("config-changed", (e) => {
         e.stopPropagation();   // a pack's config, not this card's
         const next = [...this._config.packs];
@@ -1032,6 +1102,7 @@ class BatteryStackedPackCardEditor extends HTMLElement {
           <div class="bspc-form-extras"></div>
         </div>
       </div>
+      <div class="bspc-alerts" hidden></div>
       <div class="bspc-pack">
         <div class="bspc-tools">
           <button type="button" data-act="left">◀ Move</button>
@@ -1045,6 +1116,7 @@ class BatteryStackedPackCardEditor extends HTMLElement {
     this._bankPane = this.querySelector(".bspc-bank");
     this._packPane = this.querySelector(".bspc-pack");
     this._packSlot = this.querySelector(".bspc-pack-slot");
+    this._alertsPane = this.querySelector(".bspc-alerts");
 
     const form = (sel) => {
       const f = document.createElement("ha-form");
@@ -1174,7 +1246,8 @@ class BatteryStackedPackCardEditor extends HTMLElement {
 
   _renderTabs() {
     const packs = this._config.packs;
-    const html = [`<button type="button" class="bspc-tab${this._tab < 0 ? " active" : ""}" data-tab="-1">Bank</button>`]
+    const html = [`<button type="button" class="bspc-tab${this._tab === -1 ? " active" : ""}" data-tab="-1">Bank</button>`,
+      `<button type="button" class="bspc-tab${this._tab === -2 ? " active" : ""}" data-tab="-2">Alerts</button>`]
       .concat(packs.map((p, i) => `<button type="button" class="bspc-tab${this._tab === i ? " active" : ""}" data-tab="${i}">${esc((p && p.name) || `Pack ${i + 1}`)}</button>`))
       .concat(`<button type="button" class="bspc-tab add" data-tab="add">+ Add pack</button>`)
       .join("");

@@ -10,6 +10,8 @@ A visual Lovelace card for Home Assistant that renders a 4s–32s lithium batter
 
 Every region is clickable and opens the matching entity's more-info dialog.
 
+**Warnings and alarms on your phone.** Switch on [**Alerts**](#alerts) in the card's editor and the card sets up the Home Assistant automations for you: cell difference, cell voltage, temperature, low SOC, BMS alarm and charge / discharge switched off, sent to the phones and services you tick. They follow the card: add a pack or change a threshold and they're updated.
+
 **Lots of batteries, not much screen?** A full card per pack quickly fills a dashboard, especially on a phone or wall tablet. The same install also brings a second card, [**Battery Stacked Pack Card**](#battery-stacked-pack-card): all packs at a glance, drawn as battery cases stacked in a cabinet, and tapping one opens its full Battery Pack Card. Pick it under "Add card" like any other card.
 
 ## Works out of the box with…
@@ -272,6 +274,62 @@ While editing:
 - suggestions appear as you type: template functions (`states`, `state_attr`, `relative_time`, …), filters after `|` (`round`, `default`, `timestamp_custom`, …), entities inside `states('…')` (this pack's own entities first) and attributes inside `state_attr('entity', '…')`. Pick with ↑ / ↓ and Enter or Tab, or click; Esc closes the list;
 - each field with a template shows what it renders to right now, including any error.
 
+## Alerts
+
+*Since 2.0.0 (alpha).* The card knows your packs, their entities and the thresholds you've set for its colours, so it can turn them into notifications too. Open the card's editor, go to the **Alerts** tab, switch on **Alerts for this card** and tick where they should go: the Home Assistant app on each phone, any other `notify` service, or a notification in Home Assistant itself.
+
+| Alert | When | Level |
+| --- | --- | --- |
+| Cell difference | Δ between the highest and lowest cell, for 5 minutes | warning from the card's Δ warning band (default 5 mV), alarm from its red band (15 mV) |
+| Cell voltage | any cell above or below what the chemistry allows (LFP 3.60 / 2.90 V, NMC 4.15 / 3.10 V, LTO 2.75 / 1.90 V) | alarm |
+| Temperature | the hottest or coldest sensor | warning from the card's amber, alarm from its red; warning below its blue |
+| Low SOC | SOC at or below 20 % / 10 % (off by default: a low SOC is often normal at night) | warning / alarm |
+| BMS alarm | the pack's alarm entity | alarm |
+| Charge / discharge switched off | the BMS turned charging or discharging off | warning |
+
+A threshold left blank follows the card: change the card's Δ or temperature bands and the alerts follow. Each alert covers only what a pack has: no temperature sensors, no temperature alert for that pack.
+
+**How it works.** The card makes one ordinary Home Assistant automation per alert, covering all of the card's packs, named after the card (`Battery Bank · Cell difference`, …). You'll find them under Settings → Automations, and the Alerts tab links to each one. Each automation remembers what it was made from; when the card's config changes (a pack, an entity, a threshold, who to notify) and the dashboard is opened by an admin, the card rewrites the automations that changed and removes the ones you switched off. Nothing is written from the editor's preview, and users who aren't admins never write anything.
+
+- **Alarms as critical notifications:** on the Home Assistant phone app, alarms break through silent mode / do not disturb (iOS critical alert, Android alarm stream). Warnings arrive as normal notifications.
+- **Back to normal:** a short message when a warning or alarm clears. A sensor that drops out and comes back doesn't send one.
+- **Quiet hours:** hold back warnings at night; alarms always come through.
+- **Let me edit it myself in Home Assistant:** per alert. The card makes the automation once and then leaves it alone, so you can change it in Home Assistant's automation editor. An automation with the same id that the card didn't make is never touched either.
+- **Remove all alerts of this card:** deletes the card's automations and switches its alerts off. Removing the card from the dashboard doesn't remove its automations; use this button first.
+
+**The bell.** A card with alerts gets a small bell next to its alarm badge: grey while all is quiet, amber or red with a count while an alert is active, with a blue dot while the card is updating its automations. Tap it for each alert's state. Users who aren't admins only see it while something is wrong.
+
+On the **Battery Stacked Pack Card** the alerts are set once for the whole bank (its own **Alerts** tab) and cover every pack; the packs' own Alerts tabs are hidden there.
+
+```yaml
+alerts:
+  enabled: true
+  notify:
+    - notify.mobile_app_my_phone
+    - persistent_notification
+  quiet: true                # warnings not between 22:00 and 07:00
+  delta:
+    warn_mv: 8               # blank = the card's delta_warn
+  soc:
+    enabled: true
+  switches:
+    manual: true             # I'll edit this one myself
+```
+
+| Key | Default | Description |
+| --- | --- | --- |
+| `enabled` | `false` | Alerts on for this card. |
+| `notify` | — | Where to: `notify.*` services and / or `persistent_notification`. |
+| `critical` | `true` | Alarms as critical notifications on the phone app. |
+| `cleared` | `true` | Message when it's back to normal. |
+| `quiet`, `quiet_from`, `quiet_to` | `false`, `22:00:00`, `07:00:00` | Quiet hours for warnings. |
+| `key` | *(from the title)* | The automations' ids are `bpc_<key>_<alert>`. Set by the editor the first time, so renaming the card later doesn't leave automations behind. |
+| `delta` | | `enabled`, `manual`, `warn_mv`, `alarm_mv`, `minutes` (5). |
+| `cell_voltage` | | `enabled`, `manual`, `chemistry` (`lfp`, `nmc`, `lto`), `high_v`, `low_v`. |
+| `temperature` | | `enabled`, `manual`, `warm`, `hot`, `cold`, in Home Assistant's temperature unit. |
+| `soc` | | `enabled` (`false`), `manual`, `warn_pct` (20), `alarm_pct` (10). |
+| `bms_alarm`, `switches` | | `enabled`, `manual`. |
+
 ## Battery Stacked Pack Card
 
 *Since 1.6.0.* For banks of several packs. With four, eight or sixteen batteries, a full Battery Pack Card for each one takes a lot of scrolling, and on a phone or wall tablet you only ever see one or two of them. This second card shows the whole bank in one card: each pack is drawn as its battery case (− and + terminals, a screen, RUN / ALM lights), stacked in a cabinet, so you see at once which pack is low, out of balance or in alarm. Tap a pack to open its full Battery Pack Card, under its row or in a popup.
@@ -354,7 +412,7 @@ If the card says an older Battery Pack Card is loaded, the browser loads a secon
 - **Charge / discharge direction:** derived from the **current** sensor, not power. Many BMS integrations report power as an unsigned magnitude, so the card uses current's sign: positive current = charging (energy into the battery), negative = discharging. Make sure `entity_current` points at a signed sensor.
 - **Cell colouring:** cells are tinted by their offset from the pack's average voltage — by default green ≤ 2 mV, yellow ≤ 5, orange ≤ 10, red beyond. The bands are configurable, see [Cell colouring thresholds](#cell-colouring-thresholds). The lowest and highest cells get a red and green halo respectively (reversed with `max_cell_red: true`).
 - **Click-to-detail:** every visible element (battery, stat tile, pill, individual cell, temperature tile, alarm badge) opens HA's standard entity-detail dialog.
-- **Read-only:** the card never writes to the BMS. All `number.*` and `switch.*` settings entities are deliberately ignored.
+- **Read-only:** the card never writes to the BMS. All `number.*` and `switch.*` settings entities are deliberately ignored. The only thing it ever writes is its own alert automations, when you switch alerts on.
 
 ## License
 

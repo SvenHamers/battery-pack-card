@@ -33,6 +33,7 @@
     <label>Detail <select id="detail"><option value="inline">Under the pack</option><option value="popup">Popup</option></select></label>
     <label>Bank totals <select id="totals"><option value="all">SOC, V, A, Ah, W</option><option value="some">SOC + Ah only</option><option value="none">None set</option></select></label>
     <label>Pack entities <select id="pack"><option value="full">Full JK-style set</option><option value="min">Only SOC + voltage</option></select></label>
+    <label>Alerts <select id="alerts"><option value="off">Not set</option><option value="on">On (mock automations)</option></select></label>
     <label>State <select id="dir"><option value="chg">Charging</option><option value="dis">Discharging</option></select></label>
   </div>
   <div class="stage"><div class="frame" id="frame"></div></div>
@@ -69,6 +70,17 @@
     }
 
     const noWS = () => Promise.reject({ code: "unknown_command", message: "Unknown command." });
+    // Automations the card writes, kept in memory like HA's automations.yaml.
+    window.__autos = window.__autos || {};
+    window.__apiLog = window.__apiLog || [];
+    const callApi = async (method, path, body) => {
+      const id = path.replace(/^config\/automation\/config\//, "");
+      window.__apiLog.push(`${method} ${id}`);
+      await new Promise((r) => setTimeout(r, 150));
+      if (method === "GET") { if (!window.__autos[id]) throw { status_code: 404, body: { message: "Resource not found" } }; return JSON.parse(JSON.stringify(window.__autos[id])); }
+      if (method === "POST") { window.__autos[id] = { id, ...JSON.parse(JSON.stringify(body)) }; return { result: "ok" }; }
+      if (method === "DELETE") { delete window.__autos[id]; return { result: "ok" }; }
+    };
     function buildHass(packs) {
       const s = {};
       const set = (id, v, u) => (s[id] = { state: String(v), attributes: u ? { unit_of_measurement: u } : {} });
@@ -100,7 +112,8 @@
       set("sensor.bank_p", Math.round(packs.reduce((a, p) => a + p.packV * p.cur, 0)), "W");
       window.__states = s;
       return { states: s, user: { name: "Mock", is_admin: true }, config: { unit_system: { temperature: "°C" } },
-               connection: { subscribeMessage: noWS }, callWS: noWS };
+               services: { notify: { mobile_app_sven_iphone: {}, mobile_app_pixel: {}, telegram: {}, send_message: {}, persistent_notification: {} } },
+               connection: { subscribeMessage: noWS }, callWS: noWS, callApi };
     }
 
     function packConfig(p, mode) {
@@ -139,6 +152,7 @@
           entity_current: "sensor.bank_i", entity_capacity_remaining: "sensor.bank_rem", entity_power: "sensor.bank_p",
         });
         if ($("totals").value === "some") Object.assign(config, { entity_soc: "sensor.bank_soc", entity_capacity_remaining: "sensor.bank_rem" });
+        if ($("alerts").value === "on") config.alerts = { enabled: true, key: "battery_bank", notify: ["persistent_notification", "notify.mobile_app_sven_iphone"], soc: { enabled: true } };
         window.__config = config;
         if (!card) { card = document.createElement("battery-stacked-pack-card"); $("frame").appendChild(card); }
         card.setConfig(config);

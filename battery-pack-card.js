@@ -15,7 +15,7 @@
  * Click any element to open the matching entity's more-info dialog.
  */
 
-const VERSION = "1.9.0";
+const VERSION = "2.0.0-alpha.1";
 
 const DEFAULTS = {
   name: "",
@@ -528,11 +528,334 @@ const countCells = (hass, prefix) => {
 const prefixName = (p) => String(p).split("_").filter(Boolean)
   .map((w, i) => (/^bms$/i.test(w) ? "BMS" : i === 0 ? w.charAt(0).toUpperCase() + w.slice(1) : w)).join(" ");
 
+// ─── Alerts ─────────────────────────────────────────────────────────────────
+// The card's `alerts:` config becomes Home Assistant automations, one per
+// alert type covering all of the card's packs, which the card keeps in sync:
+// each automation carries a fingerprint of what it was built from, and when
+// an admin opens the dashboard after a change (a pack, entity, threshold or
+// recipient), the affected automations are rewritten. Thresholds left blank
+// follow the card's own settings (Δ and temperature bands).
+
+const ALERT_TYPES = [
+  { id: "delta",        name: "Cell difference" },
+  { id: "cell_voltage", name: "Cell voltage" },
+  { id: "temperature",  name: "Temperature" },
+  { id: "soc",          name: "Low SOC" },
+  { id: "bms_alarm",    name: "BMS alarm" },
+  { id: "switches",     name: "Charge / discharge switched off" },
+];
+const ALERT_DEFAULTS = {
+  enabled: false, notify: [], critical: true, cleared: true,
+  quiet: false, quiet_from: "22:00:00", quiet_to: "07:00:00",
+  delta:        { enabled: true,  manual: false, warn_mv: "", alarm_mv: "", minutes: 5 },
+  cell_voltage: { enabled: true,  manual: false, chemistry: "lfp", high_v: "", low_v: "" },
+  temperature:  { enabled: true,  manual: false, warm: "", hot: "", cold: "" },
+  soc:          { enabled: false, manual: false, warn_pct: 20, alarm_pct: 10 },
+  bms_alarm:    { enabled: true,  manual: false },
+  switches:     { enabled: true,  manual: false },
+};
+// Cell voltage limits per chemistry: [high, low] in V.
+const CHEMISTRY = { lfp: [3.6, 2.9], nmc: [4.15, 3.1], lto: [2.75, 1.9] };
+const alertsConfig = (raw) => {
+  const a = { ...ALERT_DEFAULTS, ...(raw || {}) };
+  for (const t of ALERT_TYPES) a[t.id] = { ...ALERT_DEFAULTS[t.id], ...((raw || {})[t.id] || {}) };
+  a.notify = Array.isArray(a.notify) ? a.notify.filter(Boolean) : a.notify ? [a.notify] : [];
+  return a;
+};
+const slugify = (s) => String(s || "").toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || "battery";
+const alertKey = (cfg) => orNull(cfg.alerts && cfg.alerts.key) || slugify(cfg.name || cfg.prefix);
+// A short, stable hash of the automation, so the card can tell whether the
+// one in Home Assistant is still what it would write now.
+const fingerprint = (obj) => {
+  const str = JSON.stringify(obj);
+  let h = 5381;
+  for (let i = 0; i < str.length; i++) h = ((h << 5) + h + str.charCodeAt(i)) | 0;
+  return (h >>> 0).toString(36);
+};
+const alertNum = (v) => { const n = parseFloat(v); return Number.isFinite(n) ? n : null; };
+
+// The thresholds an alert type uses, with the card's bands filling blanks.
+const alertThresholds = (a, bands) => {
+  const ch = CHEMISTRY[a.cell_voltage.chemistry] || CHEMISTRY.lfp;
+  return {
+    dw: alertNum(a.delta.warn_mv) ?? bands.dw, da: alertNum(a.delta.alarm_mv) ?? bands.da,
+    minutes: Math.max(0, alertNum(a.delta.minutes) ?? 5),
+    high: alertNum(a.cell_voltage.high_v) ?? ch[0], low: alertNum(a.cell_voltage.low_v) ?? ch[1],
+    tw: alertNum(a.temperature.warm) ?? bands.tw, th: alertNum(a.temperature.hot) ?? bands.th, tc: alertNum(a.temperature.cold) ?? bands.tc,
+    sw: alertNum(a.soc.warn_pct) ?? 20, sa: alertNum(a.soc.alarm_pct) ?? 10,
+  };
+};
+
+// Jinja snippets per pack and alert type. Each sets `v` (a number, a boolean,
+// or none when there's no reading), so a trigger only has to compare it.
+const jNum = (expr) => `((${expr}) | float(none))`;
+const jList = (exprs) => `[${exprs.map(jNum).join(", ")}] | select('number') | list`;
+const alertBlocks = (p) => {
+  const k = (n) => +n.toFixed(6);
+  const B = {};
+  if (p.delta) B.delta = `{% set v = ${jNum(p.delta)} %}{% set v = v * ${k(p.sSc * 1000)} if v is number else none %}`;
+  else if (p.vmin && p.vmax) B.delta = `{% set a = ${jNum(p.vmax)} %}{% set b = ${jNum(p.vmin)} %}{% set v = (a - b) * ${k(p.sSc * 1000)} if a is number and b is number else none %}`;
+  else if (p.cells.length > 1) B.delta = `{% set l = ${jList(p.cells)} | select('gt', 0) | list %}{% set v = ((l | max) - (l | min)) * ${k(p.vSc * 1000)} if l | length > 1 else none %}`;
+  if (p.vmax) B.high = `{% set v = ${jNum(p.vmax)} %}{% set v = v * ${k(p.sSc)} if v is number else none %}`;
+  else if (p.cells.length) B.high = `{% set l = ${jList(p.cells)} | select('gt', 0) | list %}{% set v = (l | max) * ${k(p.vSc)} if l else none %}`;
+  if (p.vmin) B.low = `{% set v = ${jNum(p.vmin)} %}{% set v = v * ${k(p.sSc)} if v is number else none %}`;
+  else if (p.cells.length) B.low = `{% set l = ${jList(p.cells)} | select('gt', 0) | list %}{% set v = (l | min) * ${k(p.vSc)} if l else none %}`;
+  if (p.temps.length) {
+    B.hot = `{% set l = ${jList(p.temps)} %}{% set v = l | max if l else none %}`;
+    B.cold = `{% set l = ${jList(p.temps)} %}{% set v = l | min if l else none %}`;
+  }
+  if (p.soc) B.soc = `{% set v = ${jNum(p.soc)} %}`;
+  // On / off readings are none while unknown or unavailable, like numbers.
+  if (p.alarmB) B.bms = `{% set s = states('${p.alarmB}') %}{% set v = (s == 'on') if s in ['on', 'off'] else none %}`;
+  else if (p.alarmS) B.bms = `{% set s = (states('${p.alarmS}') | lower | trim) %}{% set v = none if s in ['unknown', 'unavailable'] else s not in ['normal', 'ok', 'none', 'no alarm', 'off', '0', ''] %}`;
+  const sw = [p.chg, p.dch].filter(Boolean);
+  if (sw.length) B.sw = `{% set s = [${sw.map((e) => `states('${e}')`).join(", ")}] %}{% set v = ('off' in s) if s | reject('in', ['on', 'off']) | list | length == 0 else none %}`;
+  return B;
+};
+
+// The automation for one alert type, or null when no pack has what it needs.
+// Uses the long-standing trigger / condition / action keys, so it loads on
+// every Home Assistant version the card supports.
+const buildAlert = (type, ctx) => {
+  const { a, key, title, packs, T } = ctx;
+  const unit = { delta: " mV", high: " V", low: " V", hot: "°", cold: "°", soc: " %" };
+  const dec = { delta: 0, high: 3, low: 3, hot: 1, cold: 1, soc: 0 };
+  // [kind, level, test, minutes]. A warning stops where the alarm starts,
+  // so going from one into the other sends one message, not two.
+  const rules = {
+    delta:        [["delta", "warning", `v >= ${T.dw} and v < ${T.da}`, T.minutes], ["delta", "alarm", `v >= ${T.da}`, T.minutes]],
+    cell_voltage: [["high", "alarm", `v > ${T.high}`, 1], ["low", "alarm", `v < ${T.low}`, 1]],
+    temperature:  [["hot", "warning", `v >= ${T.tw} and v < ${T.th}`, 2], ["hot", "alarm", `v >= ${T.th}`, 2], ["cold", "warning", `v <= ${T.tc}`, 5]],
+    soc:          [["soc", "warning", `v <= ${T.sw} and v > ${T.sa}`, 1], ["soc", "alarm", `v <= ${T.sa}`, 1]],
+    bms_alarm:    [["bms", "alarm", "v", 0]],
+    switches:     [["sw", "warning", "v", 1]],
+  }[type];
+  // Back to normal. No reading counts as normal here, so a sensor that drops
+  // out and comes back doesn't send "back to normal" out of nowhere; one
+  // that drops out during an alarm is caught by the value check below.
+  const clears = {
+    delta: [["delta", `v < ${T.dw}`, Math.max(2, T.minutes)]],
+    cell_voltage: [["high", `v <= ${T.high}`, 2], ["low", `v >= ${T.low}`, 2]],
+    temperature: [["hot", `v < ${T.tw}`, 5], ["cold", `v > ${T.tc}`, 5]],
+    soc: [["soc", `v > ${T.sw}`, 2]],
+    bms_alarm: [["bms", "not v", 1]],
+    switches: [["sw", "not v", 1]],
+  }[type];
+  const boolKinds = { bms: 1, sw: 1 };
+  const cond = (test, kind) => (boolKinds[kind] ? `{{ v is sameas true }}` : `{{ v is number and (${test}) }}`);
+  const clearCond = (test, kind) => (boolKinds[kind] ? `{{ v is not sameas true }}` : `{{ v is not number or (${test}) }}`);
+  const trigger = [];
+  const values = [];
+  packs.forEach((p) => {
+    const B = alertBlocks(p);
+    const name = String(p.name || "Pack").replace(/\|/g, "/");
+    for (const [kind, level, test, min] of rules) {
+      if (!B[kind]) continue;
+      trigger.push({ platform: "template", value_template: B[kind] + cond(test, kind), ...(min ? { for: { minutes: min } } : {}), id: `${level}|${name}|${kind}` });
+    }
+    if (a.cleared) for (const [kind, test, min] of clears) {
+      if (!B[kind]) continue;
+      trigger.push({ platform: "template", value_template: B[kind] + clearCond(test, kind), for: { minutes: min }, id: `clear|${name}|${kind}` });
+    }
+    // The reading at the time, for the message: '?' when there is none.
+    for (const kind of new Set(rules.map((r) => r[0]))) {
+      if (!B[kind]) continue;
+      const shown = boolKinds[kind] ? "('yes' if v else 'no') if v is not none else '?'" : `(v | round(${dec[kind]})) if v is number else '?'`;
+      values.push(`{% elif pack == ${JSON.stringify(name)} and kind == '${kind}' %}${B[kind]}{{ ${shown} }}`);
+    }
+  });
+  if (!trigger.length) return null;
+  const tname = ALERT_TYPES.find((t) => t.id === type).name;
+  const what = { delta: "cell difference", high: "highest cell", low: "lowest cell", hot: "temperature", cold: "temperature", soc: "SOC", bms: "BMS alarm", sw: "charge or discharge switched off" };
+  const fixed = { delta: "cell difference back to normal", high: "cell voltages back to normal", low: "cell voltages back to normal", hot: "temperature back to normal", cold: "temperature back to normal", soc: "SOC back to normal", bms: "BMS alarm cleared", sw: "charge and discharge back on" };
+  const valueTpl = values.length ? `{% if false %}${values.join("")}{% endif %}` : "";
+  const units = JSON.stringify(unit).replace(/"/g, "'");
+  const whats = JSON.stringify(what).replace(/"/g, "'");
+  const fixeds = JSON.stringify(fixed).replace(/"/g, "'");
+  const message = `{% set w = ${whats} %}{% set u = ${units} %}{% set f = ${fixeds} %}{{ pack }}: {% if level == 'clear' %}{{ f[kind] }}{% if value not in ['', '?'] and kind not in ['bms', 'sw'] %} ({{ value }}{{ u[kind] }}){% endif %}{% elif kind in ['bms', 'sw'] %}{{ w[kind] }}{% else %}{{ w[kind] }} {{ value }}{{ u[kind] }}{% endif %}`;
+  const titleTpl = `{{ {'warning': '⚠️ Battery warning', 'alarm': '🚨 Battery alarm', 'clear': '✅ Battery OK'}[level] }} · ${title.replace(/[{}]/g, "")}`;
+  const action = [{ variables: {
+    level: "{{ trigger.id.split('|')[0] }}", pack: "{{ trigger.id.split('|')[1] }}", kind: "{{ trigger.id.split('|')[2] }}",
+    value: valueTpl,
+  } }];
+  // A sensor that dropped out isn't "back to normal".
+  if (a.cleared) action.push({ condition: "template", value_template: "{{ level != 'clear' or value != '?' }}" });
+  if (a.quiet) action.push({ condition: "or", conditions: [
+    { condition: "template", value_template: "{{ level != 'warning' }}" },
+    { condition: "time", after: a.quiet_to || "07:00:00", before: a.quiet_from || "22:00:00" },
+  ] });
+  for (const t of a.notify) {
+    if (t === "persistent_notification") {
+      action.push({ service: "persistent_notification.create", data: { title: titleTpl, message, notification_id: `bpc_${key}_${type}_{{ pack | slugify }}` } });
+    } else {
+      const data = { title: titleTpl, message };
+      if (a.critical && /^notify\.mobile_app_/.test(t)) data.data = "{{ {'push': {'interruption-level': 'critical'}, 'ttl': 0, 'priority': 'high', 'channel': 'alarm_stream'} if level == 'alarm' else {} }}";
+      action.push({ service: t, data });
+    }
+  }
+  const auto = {
+    alias: `${title} · ${tname}`,
+    description: `Managed by Battery Pack Card (${title}). Changes made here are overwritten when the card's alerts change; switch on "Let me edit it myself" for this alert in the card to keep your own version.`,
+    mode: "queued", max: 25,
+    trigger, condition: [], action,
+  };
+  auto.variables = { bpc_managed: true, bpc_card: key, bpc_fingerprint: fingerprint(auto) };
+  return auto;
+};
+
+// Every automation the card wants: { type: config | null }.
+const buildAlerts = (cfg, packs) => {
+  const a = alertsConfig(cfg.alerts);
+  const out = {};
+  if (!a.enabled || !a.notify.length) { for (const t of ALERT_TYPES) out[t.id] = null; return out; }
+  const T = alertThresholds(a, packs[0] ? packs[0].bands : { dw: 5, da: 15, tw: 35, th: 50, tc: 5 });
+  const ctx = { a, key: alertKey(cfg), title: cfg.name || "Battery", packs, T };
+  for (const t of ALERT_TYPES) out[t.id] = a[t.id].enabled ? buildAlert(t.id, ctx) : null;
+  return out;
+};
+
+// The alerts as they stand right now, from the cards' own readings, for the
+// bell: { type: { level: "ok" | "warning" | "alarm" | "off" | "manual", where } }.
+const alertStatus = (cfg, sums, bands) => {
+  const a = alertsConfig(cfg.alerts);
+  const T = alertThresholds(a, bands || { dw: 5, da: 15, tw: 35, th: 50, tc: 5 });
+  const out = {};
+  const check = (id, fn) => {
+    if (!a[id].enabled) return (out[id] = { level: "off", where: [] });
+    if (a[id].manual) return (out[id] = { level: "manual", where: [] });
+    const hits = sums.filter(Boolean).map((s) => [s.name, fn(s)]).filter(([, l]) => l);
+    const level = hits.some(([, l]) => l === "alarm") ? "alarm" : hits.length ? "warning" : "ok";
+    out[id] = { level, where: hits.filter(([, l]) => l === level).map(([n]) => n) };
+  };
+  const n = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+  check("delta", (s) => (n(s.deltaMv) === null ? 0 : s.deltaMv >= T.da ? "alarm" : s.deltaMv >= T.dw ? "warning" : 0));
+  check("cell_voltage", (s) => ((n(s.cellMax) !== null && s.cellMax > T.high) || (n(s.cellMin) !== null && s.cellMin > 0 && s.cellMin < T.low) ? "alarm" : 0));
+  check("temperature", (s) => { const t = s.temp && n(s.temp.shown); return t === null ? 0 : t >= T.th ? "alarm" : t >= T.tw || t <= T.tc ? "warning" : 0; });
+  check("soc", (s) => (n(s.soc) === null ? 0 : s.soc <= T.sa ? "alarm" : s.soc <= T.sw ? "warning" : 0));
+  check("bms_alarm", (s) => (s.alarm ? "alarm" : 0));
+  check("switches", (s) => (s.charge === false || s.discharge === false ? "warning" : 0));
+  return out;
+};
+
+// Write / update / remove the card's automations so Home Assistant matches
+// `want`. Automations switched to "edit it myself" are created once and then
+// left alone; ones not made by the card are never touched.
+const syncAlerts = async (hass, key, want, cfg) => {
+  const a = alertsConfig(cfg.alerts);
+  const get = async (id) => {
+    try { return await hass.callApi("GET", `config/automation/config/${id}`); } catch (e) { return null; }
+  };
+  const done = [];
+  for (const t of ALERT_TYPES) {
+    const id = `bpc_${key}_${t.id}`;
+    const w = want[t.id];
+    const cur = await get(id);
+    const ours = cur && cur.variables && cur.variables.bpc_managed;
+    if (a[t.id].manual) {
+      if (!cur && w) { await hass.callApi("POST", `config/automation/config/${id}`, w); done.push(`created ${id}`); }
+      continue;
+    }
+    if (!w) {
+      if (ours) { await hass.callApi("DELETE", `config/automation/config/${id}`); done.push(`removed ${id}`); }
+      continue;
+    }
+    if (cur && !ours) continue;   // someone else's automation with our id: leave it
+    if (!cur || cur.variables.bpc_fingerprint !== w.variables.bpc_fingerprint) {
+      await hass.callApi("POST", `config/automation/config/${id}`, w);
+      done.push(`${cur ? "updated" : "created"} ${id}`);
+    }
+  }
+  return done;
+};
+
+// Running inside the card editor's preview? Then never write anything.
+const inEditor = (el) => {
+  for (let n = el; n; n = n.parentNode || n.host) {
+    const tag = (n.tagName || "").toLowerCase();
+    if (tag === "hui-card-preview" || tag === "hui-dialog-edit-card" || tag === "hui-card-element-editor") return true;
+  }
+  return false;
+};
+
+// The bell in a card's header and its status popover (shared by both cards).
+const BELL_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 22a2 2 0 0 0 2-2h-4a2 2 0 0 0 2 2m6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4a1.5 1.5 0 0 0-3 0v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1z"/></svg>`;
+const alertsBell = (status, sync, admin) => {
+  const vals = Object.values(status);
+  const alarms = vals.filter((s) => s.level === "alarm").length, warns = vals.filter((s) => s.level === "warning").length;
+  if (!admin && !alarms && !warns) return "";
+  const cls = alarms ? "is-alarm" : warns ? "is-warn" : "";
+  const tip = alarms || warns ? `${alarms + warns} alert${alarms + warns > 1 ? "s" : ""} active` : sync.state === "busy" ? "Updating the alerts…" : "Alerts: all quiet";
+  return `<button type="button" class="bpc-bell ${cls}${sync.state === "busy" ? " syncing" : ""}" data-action="alerts" title="${tip}" aria-label="${tip}">${BELL_SVG}${alarms + warns ? `<span class="badge">${alarms + warns}</span>` : ""}<span class="sync"></span></button>`;
+};
+const alertsPopover = (status, sync, cfg, esc) => {
+  const a = alertsConfig(cfg.alerts);
+  const tag = { ok: ["t-ok", "ok"], warning: ["t-warn", "warning"], alarm: ["t-alarm", "alarm"], off: ["t-off", "off"], manual: ["t-own", "your own"] };
+  const syncTag = sync.state === "busy" ? `<span class="tag t-warn">updating…</span>` : sync.state === "error" ? `<span class="tag t-alarm" title="${esc(sync.error || "")}">not updated</span>` : sync.state === "ok" ? `<span class="tag t-ok">in sync</span>` : "";
+  return `<div class="bpc-pop">
+    <div class="h"><b>Alerts</b>${syncTag}</div>
+    <div class="st">${a.notify.length ? `To ${a.notify.map((t) => esc(t === "persistent_notification" ? "notification in Home Assistant" : t.replace(/^notify\./, ""))).join(", ")}` : "No one to notify yet."}</div>
+    <ul>${ALERT_TYPES.map((t) => { const s = status[t.id] || { level: "off", where: [] }; const [c, l] = tag[s.level]; return `<li><span>${t.name}</span><span class="tag ${c}">${l}${s.where.length && (s.level === "warning" || s.level === "alarm") ? ` · ${esc(s.where.join(", "))}` : ""}</span></li>`; }).join("")}</ul>
+    ${sync.state === "error" ? `<div class="st err">${esc(sync.error || "")}</div>` : ""}
+    <div class="st">Change them in the card's editor, under <i>Alerts</i>.</div>
+  </div>`;
+};
+const ALERTS_CSS = `
+  .bpc-bellwrap { position: relative; display: flex; }
+  .bpc-bell { position: relative; width: 30px; height: 30px; border-radius: 50%; border: 0; background: none; color: var(--secondary-text-color, #8a8a8a); opacity: 0.7; cursor: pointer; display: grid; place-items: center; padding: 0; }
+  .bpc-bell:hover { opacity: 1; background: rgba(127,127,127,0.12); }
+  .bpc-bell svg { width: 18px; height: 18px; flex: none; }
+  .bpc-bell .badge { position: absolute; top: 1px; right: 0; min-width: 15px; height: 15px; padding: 0 3px; border-radius: 8px; font-size: 10px; font-weight: 700; line-height: 15px; text-align: center; color: #111; }
+  .bpc-bell .sync { position: absolute; top: 4px; right: 4px; width: 7px; height: 7px; border-radius: 50%; background: var(--primary-color, #03a9f4); display: none; animation: bpcpulse 1s ease-in-out infinite; }
+  .bpc-bell.syncing .sync { display: block; }
+  .bpc-bell.is-warn { color: var(--clr-amber, #ffc107); opacity: 1; } .bpc-bell.is-warn .badge { background: var(--clr-amber, #ffc107); }
+  .bpc-bell.is-alarm { color: var(--clr-red, #ef5350); opacity: 1; } .bpc-bell.is-alarm .badge { background: var(--clr-red, #ef5350); color: #fff; }
+  @keyframes bpcpulse { 50% { opacity: 0.3; } }
+  .bpc-pop { position: absolute; right: 0; top: 36px; width: 270px; z-index: 5; padding: 10px 12px; border-radius: 12px; text-align: left;
+    background: var(--card-background-color, #262626); color: var(--primary-text-color, #e1e1e1); box-shadow: 0 10px 32px rgba(0,0,0,0.5); border: 1px solid rgba(127,127,127,0.25); font-size: 12.5px; }
+  .bpc-pop .h { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; font-size: 13px; }
+  .bpc-pop .st { font-size: 11.5px; color: var(--secondary-text-color, #9b9b9b); margin: 4px 0; }
+  .bpc-pop .st.err { color: var(--clr-red, #ef5350); }
+  .bpc-pop ul { list-style: none; margin: 4px 0; padding: 0; }
+  .bpc-pop li { display: flex; justify-content: space-between; gap: 8px; padding: 4px 0; border-top: 1px solid rgba(127,127,127,0.18); }
+  .bpc-pop .tag { font-size: 10.5px; font-weight: 700; padding: 1px 7px; border-radius: 9px; white-space: nowrap; }
+  .bpc-pop .tag.t-ok { color: #4caf50; background: rgba(76,175,80,0.13); } .bpc-pop .tag.t-warn { color: #ffc107; background: rgba(255,193,7,0.13); }
+  .bpc-pop .tag.t-alarm { color: #ef5350; background: rgba(239,83,80,0.15); } .bpc-pop .tag.t-off { color: #9e9e9e; background: rgba(158,158,158,0.12); }
+  .bpc-pop .tag.t-own { color: #b39ddb; background: rgba(179,157,219,0.12); }
+`;
+
+// One running sync per card at a time; again when what the card wants
+// changes, and every 10 minutes in case an automation was removed by hand.
+class AlertsSync {
+  constructor(onChange) { this.state = { state: "", error: "" }; this.sig = null; this.at = 0; this.busy = false; this.onChange = onChange; }
+  tick(el, hass, cfg, packsFn) {
+    if (!cfg || !cfg.alerts || !hass || !hass.callApi || hass.user?.is_admin !== true || !el.isConnected || inEditor(el)) return;
+    // Every few seconds at most: HA hands over a new hass on any change.
+    const now = Date.now();
+    if (this.busy || (cfg === this.cfg && now - this.checked < 5000)) return;
+    this.cfg = cfg;
+    this.checked = now;
+    const want = buildAlerts(cfg, packsFn());
+    const sig = alertKey(cfg) + JSON.stringify(Object.values(want).map((w) => w && w.variables.bpc_fingerprint)) + JSON.stringify(ALERT_TYPES.map((t) => alertsConfig(cfg.alerts)[t.id].manual));
+    if (sig === this.sig && now - this.at < 600000) return;
+    this.busy = true;
+    this.state = { state: "busy", error: "" };
+    this.onChange();
+    syncAlerts(hass, alertKey(cfg), want, cfg)
+      .then((done) => { this.sig = sig; this.state = { state: "ok", error: "", done }; if (done.length) console.info("BATTERY-PACK-CARD alerts:", done.join(", ")); })
+      .catch((e) => { this.sig = sig; this.state = { state: "error", error: (e && (e.body && e.body.message || e.message)) || "Could not update the automations." }; })
+      .finally(() => { this.busy = false; this.at = Date.now(); this.onChange(); });
+  }
+}
+
+// Everything the stacked card needs from here, as one object.
+const ALERTS_API = { TYPES: ALERT_TYPES, config: alertsConfig, build: buildAlerts, status: alertStatus, sync: syncAlerts, key: alertKey, bell: alertsBell, popover: alertsPopover, css: ALERTS_CSS, Sync: AlertsSync, inEditor };
+
 const lsGet = (k) => { try { return localStorage.getItem(k); } catch (e) { return null; } };
 const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch (e) { /* private mode etc. */ } };
 
 // ─── Main card ─────────────────────────────────────────────────────────────
 class BatteryPackCard extends HTMLElement {
+  static get alerts() { return ALERTS_API; }
   static getStubConfig(hass) {
     // Start from the first pack the JK-BMS add-on has in this Home Assistant
     // (any naming); the alarm entities are then found by the card itself.
@@ -582,6 +905,14 @@ class BatteryPackCard extends HTMLElement {
     this._root.addEventListener("click", (e) => {
       const path = e.composedPath();
       if (path.some((n) => n.dataset && n.dataset.action === "info")) return this._toggleInfo();
+      if (path.some((n) => n.classList && n.classList.contains("bpc-pop"))) return;
+      const bell = path.some((n) => n.dataset && n.dataset.action === "alerts");
+      if (bell || this._alertsOpen) {
+        this._alertsOpen = bell && !this._alertsOpen;
+        this._html = null;
+        this._render();
+        if (bell) return;
+      }
       const el = path.find((n) => n.dataset && n.dataset.entity);
       if (el && el.dataset.entity) this._moreInfo(el.dataset.entity);
     });
@@ -1168,6 +1499,47 @@ class BatteryPackCard extends HTMLElement {
     };
   }
 
+  // What the alert automations read for this pack: each entity setting as a
+  // Jinja expression (an entity's state, or the body of a one-expression
+  // template), the voltage scales as currently detected, and the card's own
+  // bands in Home Assistant's temperature unit. Settings that point at
+  // nothing in HA are left out, so an alert only covers what the pack has.
+  alertInputs() {
+    if (!this._hass || !this._config) return null;
+    const cfg = this._config, E = this._resolveEntities();
+    const expr = (eid) => {
+      if (!eid || !this._exists(eid)) return null;
+      if (!isTpl(eid)) return `states('${eid}')`;
+      const m = /^\s*\{\{([\s\S]*)\}\}\s*$/.exec(eid);
+      return m && !/\{\{|\}\}|\{%|\{#/.test(m[1]) ? `(${m[1].trim()})` : null;
+    };
+    const ent = (eid) => (eid && !isTpl(eid) && this._exists(eid) ? eid : null);
+    const cellIds = [];
+    for (let n = 1; n <= (cfg.cells || 0); n++) cellIds.push(this._cellEntity("v", n));
+    const sSc = this._voltScaleFor([E.vMin, E.vAvg, E.vMax].map((e) => this._raw(e)), voltScale(orNull(cfg.summary_voltage_from) || cfg.cell_voltage_from), "Min/avg/max voltages");
+    const vSc = this._voltScaleFor(cellIds.map((e) => this._raw(e)), voltScale(cfg.cell_voltage_from), "Cell voltages");
+    // Temperature bands as the card shows them, converted into HA's unit
+    // (what states() of a temperature sensor is in).
+    const haF = isFahrenheit(this._hass.config?.unit_system?.temperature);
+    const want = String(cfg.temperature_unit || "auto").toUpperCase();
+    const inF = want === "F" || (want !== "C" && haF);
+    const toBand = (x) => (inF ? x * 9 / 5 + 32 : x);
+    const toHa = (x) => (inF === haF ? x : haF ? x * 9 / 5 + 32 : (x - 32) * 5 / 9);
+    const [tc, tw, th] = [numOrAny(cfg.temp_cold, toBand(5)), numOrAny(cfg.temp_warm, toBand(35)), numOrAny(cfg.temp_hot, toBand(50))]
+      .sort((a, b) => a - b).map((x) => +toHa(x).toFixed(1));
+    const d = deltaBands(cfg);
+    return {
+      name: cfg.name,
+      cells: cellIds.map(expr).filter(Boolean),
+      vmin: expr(E.vMin), vmax: expr(E.vMax), delta: expr(E.vDelta),
+      sSc, vSc,
+      temps: [E.tMos, E.t1, E.t2, E.t3, E.t4].map(expr).filter(Boolean),
+      soc: expr(E.soc),
+      alarmB: ent(E.alarmB), alarmS: ent(E.alarmS), chg: ent(E.chg), dch: ent(E.dch),
+      bands: { dw: d.warn, da: d.bad, tw, th, tc },
+    };
+  }
+
   getCardSize() {
     const c = this._config || {};
     let n = 2;
@@ -1448,8 +1820,11 @@ class BatteryPackCard extends HTMLElement {
     const html = `
       <div class="header">
         <div class="title">${this._esc(cfg.name)}</div>
-        <div class="alarm ${alarmActive ? "alert" : "ok"}" ${this._dataE(E.alarmB)} role="button">
-          <span class="dot"></span>${this._esc(alarm)}
+        <div class="hdr-r">
+          ${this._alertsHtml()}
+          <div class="alarm ${alarmActive ? "alert" : "ok"}" ${this._dataE(E.alarmB)} role="button">
+            <span class="dot"></span>${this._esc(alarm)}
+          </div>
         </div>
       </div>
 
@@ -1493,6 +1868,26 @@ class BatteryPackCard extends HTMLElement {
     const next = document.createElement("div");
     next.innerHTML = html;
     patchChildren(this._root, next);
+  }
+
+  // ─── Alerts ──────────────────────────────────────────────────────────────
+  // The bell next to the alarm pill, and keeping this card's automations in
+  // line with its config. Neither for a pack drawn inside the stacked card
+  // (that card owns the alerts) nor while the card is a preview in the editor.
+  _alertsOn() {
+    const a = this._config && this._config.alerts;
+    return !!(a && a.enabled && !this._noAlerts);
+  }
+  _alertsHtml() {
+    const cfg = this._config;
+    if (!cfg.alerts || this._noAlerts) return "";
+    this._alertSync = this._alertSync || new AlertsSync(() => { this._html = null; this._queueRender(); });
+    this._alertSync.tick(this, this._hass, cfg, () => [this.alertInputs()].filter(Boolean));
+    if (!this._alertsOn()) return "";
+    const inp = this.alertInputs();
+    const status = alertStatus(cfg, [this.summary()], inp && inp.bands);
+    const st = this._alertSync.state;
+    return `<span class="bpc-bellwrap">${alertsBell(status, st, this._isAdmin())}${this._alertsOpen ? alertsPopover(status, st, cfg, (t) => this._esc(t)) : ""}</span>`;
   }
 
   // Clicking a templated value opens the first entity the template reads.
@@ -1642,6 +2037,8 @@ class BatteryPackCard extends HTMLElement {
       [data-entity]:focus-visible { outline: 2px solid var(--clr-blue); outline-offset: 2px; }
 
       .header { display:flex; justify-content:space-between; align-items:center; gap: 12px; }
+      .hdr-r  { display:flex; align-items:center; gap: 4px; }
+      ${ALERTS_CSS}
       .title  { font-size: 20px; font-weight: 600; letter-spacing: 0.3px; }
       .alarm  { display:flex; align-items:center; gap:6px; font-size:12px; font-weight:500; padding:4px 12px; border-radius:14px; }
       .alarm.ok    { color: var(--clr-green); background: rgba(76,175,80,0.13); }
@@ -1906,9 +2303,11 @@ class BatteryPackCardEditor extends HTMLElement {
       <div class="bpc-tabs">
         <button type="button" class="bpc-tab" data-tab="basic">Basic</button>
         <button type="button" class="bpc-tab" data-tab="advanced">Advanced</button>
+        ${this._noAlerts ? "" : `<button type="button" class="bpc-tab" data-tab="alerts">Alerts</button>`}
       </div>
       <div class="bpc-pane" id="bpc-basic"></div>
       <div class="bpc-pane" id="bpc-advanced"></div>
+      <div class="bpc-pane" id="bpc-alerts"></div>
     `;
 
     this.querySelectorAll(".bpc-tab").forEach((btn) => {
@@ -1940,6 +2339,12 @@ class BatteryPackCardEditor extends HTMLElement {
     for (const section of ADVANCED_SECTIONS) {
       this._appendAdvSection(section.title, section.schema, null, section.hint);
     }
+    // Alerts pane: the shared alerts editor, fed by a headless copy of the
+    // card so it sees the same entities the card does.
+    this._alertsEd = document.createElement("battery-pack-card-alerts-editor");
+    this._alertsEd.addEventListener("alerts-changed", (ev) => this._dispatch({ ...this._config, alerts: ev.detail.alerts }));
+    this.querySelector("#bpc-alerts").appendChild(this._alertsEd);
+
     // Placeholder; the per-cell sections are rebuilt whenever `cells` changes.
     this._cellSlot = document.createElement("div");
     this._advPane.appendChild(this._cellSlot);
@@ -2112,7 +2517,14 @@ class BatteryPackCardEditor extends HTMLElement {
   }
 
   _updateActiveTab() {
-    if (this._tab === "basic") {
+    if (this._tab === "alerts") {
+      if (!this._alertSrc) this._alertSrc = BatteryPackCard.summarySource({ type: "custom:battery-pack-card", ...this._config }, () => {});
+      if (this._alertSrcFor !== this._config) { this._alertSrcFor = this._config; this._alertSrc.setConfig({ ...this._config }); }
+      this._alertSrc.hass = this._hass;
+      this._alertsEd.inputs = () => [this._alertSrc.alertInputs()].filter(Boolean);
+      this._alertsEd.config = this._config;
+      this._alertsEd.hass = this._hass;
+    } else if (this._tab === "basic") {
       this._basicForm.hass = this._hass;
       this._basicForm.schema = this._basicSchema();
       this._basicForm.data = { ...DEFAULTS, ...this._config };
@@ -2131,12 +2543,215 @@ class BatteryPackCardEditor extends HTMLElement {
   }
 }
 
+// ─── Alerts editor ───────────────────────────────────────────────────────────
+// The Alerts tab of both cards' editors. Set `hass`, `config` (the whole card
+// config) and `inputs` (a function returning the packs' alertInputs); it
+// fires "alerts-changed" with the new `alerts` block. It never writes the
+// automations itself: the card does, once the dashboard is saved and shown.
+const ALERT_LABELS = {
+  enabled: "Alerts for this card", notify: "Notify", critical: "Alarms as critical notifications (phone app)",
+  cleared: "Send a message when it's back to normal", quiet: "Quiet hours for warnings (alarms always come through)",
+  quiet_from: "Quiet from", quiet_to: "Quiet until",
+  manual: "Let me edit it myself in Home Assistant",
+  warn_mv: "Warning from (mV)", alarm_mv: "Alarm from (mV)", minutes: "For at least (minutes)",
+  chemistry: "Cell chemistry", high_v: "Alarm above (V)", low_v: "Alarm below (V)",
+  warm: "Warning from (°)", hot: "Alarm from (°)", cold: "Warning below (°)",
+  warn_pct: "Warning at or below (%)", alarm_pct: "Alarm at or below (%)",
+};
+const ALERT_HINTS = {
+  delta: "The difference between the highest and the lowest cell.",
+  cell_voltage: "Any cell above or below what the chemistry allows.",
+  temperature: "The hottest and the coldest sensor, in Home Assistant's temperature unit.",
+  soc: "Off by default: a low SOC is often normal at night.",
+  bms_alarm: "When the BMS reports an alarm.",
+  switches: "When the BMS turns charging or discharging off.",
+};
+class BatteryPackCardAlertsEditor extends HTMLElement {
+  set hass(h) { this._hass = h; this._render(); }
+  set config(c) { this._config = c || {}; this._render(); }
+  set inputs(fn) { this._inputs = fn; this._render(); }
+
+  _alerts() { return alertsConfig(this._config && this._config.alerts); }
+
+  _emit(alerts) {
+    // The automations' ids come from the key: stored once, so renaming the
+    // card later doesn't leave the old automations behind.
+    if (!alerts.key) alerts = { key: alertKey(this._config || {}), ...alerts };
+    // Only what differs from the defaults, to keep the YAML short.
+    const out = {};
+    for (const [k, v] of Object.entries(alerts)) {
+      const def = ALERT_DEFAULTS[k];
+      if (ALERT_TYPES.some((t) => t.id === k)) {
+        const sub = {};
+        for (const [sk, sv] of Object.entries(v || {})) if (sv !== def[sk] && sv !== undefined && sv !== "") sub[sk] = sv;
+        if (Object.keys(sub).length) out[k] = sub;
+      } else if (k === "enabled" || k === "key" || k === "notify" || v !== def) out[k] = v;
+    }
+    alerts = out;
+    this._config = { ...this._config, alerts };
+    this.dispatchEvent(new CustomEvent("alerts-changed", { detail: { alerts }, bubbles: true, composed: true }));
+    this._render();
+  }
+
+  _notifyOptions() {
+    const svcs = Object.keys((this._hass && this._hass.services && this._hass.services.notify) || {})
+      .filter((n) => n !== "send_message" && n !== "persistent_notification").sort();
+    const opts = [{ value: "persistent_notification", label: "Notification in Home Assistant" },
+      ...svcs.map((n) => ({ value: `notify.${n}`, label: n.replace(/^mobile_app_/, "📱 ").replace(/_/g, " ") }))];
+    for (const t of this._alerts().notify) if (!opts.some((o) => o.value === t)) opts.push({ value: t, label: `${t} (not found)` });
+    return opts;
+  }
+
+  _bands() {
+    let p = null;
+    try { p = this._inputs && this._inputs()[0]; } catch (e) { p = null; }
+    return (p && p.bands) || { dw: 5, da: 15, tw: 35, th: 50, tc: 5 };
+  }
+
+  _schema(a) {
+    const box = (step, min, max) => ({ number: { mode: "box", step, ...(min !== undefined ? { min } : {}), ...(max !== undefined ? { max } : {}) } });
+    const base = [{ name: "enabled", selector: { boolean: {} } }];
+    if (!a.enabled) return base;
+    base.push(
+      { name: "notify", selector: { select: { multiple: true, mode: "list", options: this._notifyOptions() } } },
+      { name: "critical", selector: { boolean: {} } },
+      { name: "cleared", selector: { boolean: {} } },
+      { name: "quiet", selector: { boolean: {} } },
+    );
+    if (a.quiet) base.push({ type: "grid", name: "", schema: [{ name: "quiet_from", selector: { time: {} } }, { name: "quiet_to", selector: { time: {} } }] });
+    const fields = {
+      delta: [{ type: "grid", name: "", schema: [{ name: "warn_mv", selector: box(1, 0) }, { name: "alarm_mv", selector: box(1, 0) }, { name: "minutes", selector: box(1, 0, 120) }] }],
+      cell_voltage: [{ name: "chemistry", selector: { select: { mode: "dropdown", options: [{ value: "lfp", label: "LiFePO4 (LFP)" }, { value: "nmc", label: "Li-ion (NMC)" }, { value: "lto", label: "LTO" }] } } },
+        { type: "grid", name: "", schema: [{ name: "high_v", selector: box(0.01, 0) }, { name: "low_v", selector: box(0.01, 0) }] }],
+      temperature: [{ type: "grid", name: "", schema: [{ name: "warm", selector: box(1) }, { name: "hot", selector: box(1) }, { name: "cold", selector: box(1) }] }],
+      soc: [{ type: "grid", name: "", schema: [{ name: "warn_pct", selector: box(1, 0, 100) }, { name: "alarm_pct", selector: box(1, 0, 100) }] }],
+      bms_alarm: [], switches: [],
+    };
+    for (const t of ALERT_TYPES) {
+      const on = a[t.id].enabled;
+      base.push({
+        type: "expandable", name: t.id, title: `${on ? "●" : "○"} ${t.name}${on && a[t.id].manual ? " · your own" : ""}`,
+        schema: [{ name: "enabled", label: "Send this alert", selector: { boolean: {} } }, ...(on ? [...fields[t.id], { name: "manual", selector: { boolean: {} } }] : [])],
+      });
+    }
+    return base;
+  }
+
+  _helper(s) {
+    const b = this._bands(), a = this._alerts();
+    const ch = CHEMISTRY[a.cell_voltage.chemistry] || CHEMISTRY.lfp;
+    return {
+      warn_mv: `Blank = the card's Δ warning, ${b.dw} mV`, alarm_mv: `Blank = the card's Δ red, ${b.da} mV`,
+      high_v: `Blank = ${ch[0].toFixed(2)} V`, low_v: `Blank = ${ch[1].toFixed(2)} V`,
+      warm: `Blank = the card's amber, ${b.tw}°`, hot: `Blank = the card's red, ${b.th}°`, cold: `Blank = the card's blue, ${b.tc}°`,
+      manual: "The card makes it once and then leaves it to you.",
+      critical: "Breaks through silent mode on phones with the Home Assistant app.",
+    }[s.name];
+  }
+
+  _render() {
+    if (!this._hass || !this._config) return;
+    if (!this._form) {
+      this.innerHTML = `
+        <style>
+          battery-pack-card-alerts-editor { display: block; }
+          .bpa-status { display: flex; align-items: center; gap: 8px; font-size: 13px; padding: 9px 12px; border-radius: 8px; margin-bottom: 10px; background: rgba(127,127,127,0.1); }
+          .bpa-status.ok { background: rgba(76,175,80,0.12); } .bpa-status.warn { background: rgba(255,193,7,0.12); }
+          .bpa-status a { color: var(--primary-color); }
+          .bpa-hint { font-size: 12px; color: var(--secondary-text-color); margin: 4px 0 12px; line-height: 1.45; }
+          .bpa-types { font-size: 12px; color: var(--secondary-text-color); margin: 10px 0 0; line-height: 1.6; }
+          .bpa-types a { color: var(--primary-color); text-decoration: none; }
+          .bpa-remove { margin-top: 14px; padding: 8px 14px; border-radius: 8px; border: 1px solid var(--error-color, #db4437); color: var(--error-color, #db4437); background: none; cursor: pointer; font: inherit; font-size: 13px; }
+          .bpa-remove:disabled { opacity: 0.5; cursor: default; }
+        </style>
+        <div class="bpa-hint">Warnings and alarms from this card's packs, sent where you choose. The card makes one Home Assistant automation per alert and keeps it up to date: change a pack, an entity or a threshold here and the automation follows, as soon as the dashboard is saved and shown to an admin.</div>
+        <div class="bpa-status" hidden></div>
+        <ha-form></ha-form>
+        <div class="bpa-types" hidden></div>
+        <button type="button" class="bpa-remove" hidden>Remove all alerts of this card</button>`;
+      this._form = this.querySelector("ha-form");
+      this._form.computeLabel = (s) => s.label || ALERT_LABELS[s.name] || s.name;
+      this._form.computeHelper = (s) => this._helper(s);
+      this._form.addEventListener("value-changed", (ev) => {
+        ev.stopPropagation();
+        const v = ev.detail.value || {};
+        const out = { ...((this._config && this._config.alerts) || {}) };
+        for (const k of ["enabled", "notify", "critical", "cleared", "quiet", "quiet_from", "quiet_to"]) if (v[k] !== undefined) out[k] = v[k];
+        for (const t of ALERT_TYPES) if (v[t.id]) {
+          const clean = {};
+          for (const [k, x] of Object.entries(v[t.id])) if (x !== undefined && x !== "" && x !== null) clean[k] = x;
+          out[t.id] = clean;
+        }
+        this._emit(out);
+      });
+      this.querySelector(".bpa-remove").addEventListener("click", () => this._removeAll());
+    }
+    const a = this._alerts();
+    this._form.hass = this._hass;
+    this._form.schema = this._schema(a);
+    const data = { ...a };
+    for (const t of ALERT_TYPES) data[t.id] = { ...a[t.id] };
+    this._form.data = data;
+    this.querySelector(".bpa-remove").hidden = !(this._config.alerts && this._hass.user && this._hass.user.is_admin);
+    this._refreshStatus();
+  }
+
+  // What Home Assistant has now, against what the card would write.
+  _refreshStatus() {
+    const a = this._alerts();
+    const el = this.querySelector(".bpa-status"), types = this.querySelector(".bpa-types");
+    if (!a.enabled) { el.hidden = true; types.hidden = true; return; }
+    if (!a.notify.length) {
+      el.hidden = false; el.className = "bpa-status warn"; el.textContent = "Pick at least one place to notify.";
+      types.hidden = true; return;
+    }
+    let want = {};
+    try { want = buildAlerts(this._config, (this._inputs && this._inputs()) || []); } catch (e) { want = {}; }
+    const sig = JSON.stringify(Object.values(want).map((w) => w && w.variables.bpc_fingerprint)) + alertKey(this._config);
+    if (sig === this._statusSig) return;
+    this._statusSig = sig;
+    const key = alertKey(this._config);
+    const wanted = ALERT_TYPES.filter((t) => want[t.id]);
+    const skipped = ALERT_TYPES.filter((t) => a[t.id].enabled && !want[t.id]);
+    types.hidden = false;
+    types.innerHTML = wanted.map((t) => `${t.name}: <a href="/config/automation/edit/bpc_${key}_${t.id}" target="_blank" rel="noopener">open in Home Assistant ↗</a>`).join("<br>") +
+      (skipped.length ? `<br>Not made, the packs have nothing to watch for: ${skipped.map((t) => t.name).join(", ")}.` : "");
+    if (!this._hass.callApi || !this._hass.user || !this._hass.user.is_admin) { el.hidden = true; return; }
+    el.hidden = false; el.className = "bpa-status"; el.textContent = "Checking the automations…";
+    Promise.all(wanted.map((t) => this._hass.callApi("GET", `config/automation/config/bpc_${key}_${t.id}`).catch(() => null)))
+      .then((cur) => {
+        if (sig !== this._statusSig) return;
+        const stale = wanted.filter((t, i) => !a[t.id].manual && (!cur[i] || !cur[i].variables || cur[i].variables.bpc_fingerprint !== want[t.id].variables.bpc_fingerprint)).length;
+        el.className = `bpa-status ${stale ? "warn" : "ok"}`;
+        el.textContent = stale
+          ? `↻ ${stale} of ${wanted.length} automation${wanted.length > 1 ? "s" : ""} will be updated when you save.`
+          : `✓ ${wanted.length} automation${wanted.length > 1 ? "s" : ""} in Home Assistant, in sync.`;
+      });
+  }
+
+  async _removeAll() {
+    const key = alertKey(this._config);
+    if (!confirm("Remove all of this card's alert automations from Home Assistant, and switch its alerts off?")) return;
+    const btn = this.querySelector(".bpa-remove");
+    btn.disabled = true;
+    for (const t of ALERT_TYPES) {
+      const id = `bpc_${key}_${t.id}`;
+      const cur = await this._hass.callApi("GET", `config/automation/config/${id}`).catch(() => null);
+      if (cur && cur.variables && cur.variables.bpc_card === key) await this._hass.callApi("DELETE", `config/automation/config/${id}`).catch(() => null);
+    }
+    btn.disabled = false;
+    this._statusSig = null;
+    this._emit({ ...((this._config && this._config.alerts) || {}), enabled: false });
+  }
+}
+
 // Another copy may already be registered (a second resource, or one bundled
 // with an integration). The first copy wins; defining twice would throw and
 // stop this file before it loads the stacked card.
 if (!customElements.get("battery-pack-card")) {
   customElements.define("battery-pack-card", BatteryPackCard);
   customElements.define("battery-pack-card-editor", BatteryPackCardEditor);
+  customElements.define("battery-pack-card-alerts-editor", BatteryPackCardAlertsEditor);
 
   window.customCards = window.customCards || [];
   window.customCards.push({

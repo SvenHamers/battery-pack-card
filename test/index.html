@@ -139,6 +139,12 @@
       <option value="1">Yes</option>
     </select>
 
+    <label for="alerts">Alerts</label>
+    <select id="alerts">
+      <option value="off" selected>Not set</option>
+      <option value="on">On (mock automations)</option>
+    </select>
+
     <button id="reset">Reset to defaults</button>
 
     <div class="version">
@@ -305,7 +311,21 @@
 
       window.__harnessStates = states;
       setTimeout(() => window.__rerenderTemplates && window.__rerenderTemplates(), 0);
-      return { states, user: { name: "Tester", is_admin: opts.infouser === "admin" }, connection: mockConnection(opts.infouser), callWS: mockCallWS(opts.infouser) };
+      return { states, user: { name: "Tester", is_admin: opts.infouser === "admin" }, connection: mockConnection(opts.infouser), callWS: mockCallWS(opts.infouser),
+               config: { unit_system: { temperature: "°C" } }, callApi: mockCallApi,
+               services: { notify: { mobile_app_phone: {}, telegram: {}, persistent_notification: {} } } };
+    }
+
+    // Automations the card writes, kept in memory like HA's automations.yaml.
+    window.__autos = window.__autos || {};
+    window.__apiLog = window.__apiLog || [];
+    async function mockCallApi(method, path, body) {
+      const id = path.replace(/^config\/automation\/config\//, "");
+      window.__apiLog.push(`${method} ${id}`);
+      await new Promise((r) => setTimeout(r, 150));
+      if (method === "GET") { if (!window.__autos[id]) throw { status_code: 404, body: { message: "Resource not found" } }; return JSON.parse(JSON.stringify(window.__autos[id])); }
+      if (method === "POST") { window.__autos[id] = { id, ...JSON.parse(JSON.stringify(body)) }; return { result: "ok" }; }
+      if (method === "DELETE") { delete window.__autos[id]; return { result: "ok" }; }
     }
 
     function buildConfig(opts) {
@@ -352,6 +372,7 @@
         entity_temp_probe_2: "sensor.test_temp_p2",
         entity_temp_probe_3: "sensor.test_temp_p3",
         entity_temp_probe_4: "sensor.test_temp_p4",
+        ...(document.getElementById("alerts").value === "on" ? { alerts: { enabled: true, notify: ["persistent_notification", "notify.mobile_app_phone"] } } : {}),
       };
     }
 
