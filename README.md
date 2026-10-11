@@ -6,7 +6,7 @@
 
 ![Two batteries side by side](screenshot.png)
 
-A visual Lovelace card for Home Assistant that renders a 4s–32s lithium battery pack — SOC silhouette, six headline stats, status pills for charge / discharge / balance / heater, a colour-coded per-cell array (voltage + internal resistance, tinted by deviation from pack average), min/max/avg/Δ summary line, and a temperature strip. Read-only: it never writes to the BMS.
+A visual Lovelace card for Home Assistant that renders a 4s–32s lithium battery pack — SOC silhouette, six headline stats, status pills for charge / discharge / balance / heater / dry contacts, a colour-coded per-cell array (voltage + internal resistance, tinted by deviation from pack average), min/max/avg/Δ summary line, and a temperature strip. Read-only: it never writes to the BMS.
 
 Every region is clickable and opens the matching entity's more-info dialog.
 
@@ -72,7 +72,7 @@ If you use the JK-BMS RS485 addon, `prefix` is the only required field.
 | `cells`             | integer | `16`                        | Number of series cells to render (4–32).                      |
 | `show_battery`      | bool    | `true`                      | Show the SVG battery silhouette with SOC fill.                |
 | `show_stats`        | bool    | `true`                      | Show the stat tiles (voltage, current, power, balance, cycles, phase). Tiles whose sensor doesn't exist are hidden; without a power sensor, power is voltage × current. |
-| `show_pills`        | bool    | `true`                      | Show charge / discharge / balance / heater status pills. Pills whose sensor doesn't exist are hidden; each can also be switched off, see [Status pills](#status-pills). |
+| `show_pills`        | bool    | `true`                      | Show charge / discharge / balance / heater / DRY1 / DRY2 status pills. Pills whose sensor doesn't exist are hidden; each can also be switched off, see [Status pills](#status-pills). |
 | `show_cells`        | bool    | `true`                      | Show the per-cell voltage + resistance grid.                  |
 | `show_cell_resistance` | bool | `true`                    | Show the internal resistance under each cell's voltage. Hidden anyway when your BMS has no resistance sensors (e.g. Seplos), unless `show_missing` is on. |
 | `show_summary`      | bool    | `true`                      | Show the min / avg / max / Δ summary line.                    |
@@ -136,6 +136,10 @@ cell_voltage_pattern: "{{ states('sensor.pack_cell_{nn}') | float(0) / 1000 }}"
 | `entity_switch_balance`      | `binary_sensor.X_switch_balance`              | Balancer enabled by user.    |
 | `entity_balance_active`      | `binary_sensor.X_balance_action`              | Balancer actively balancing. |
 | `entity_heating`             | `binary_sensor.X_heating`                     | Heating element on / off.    |
+| `entity_dry1`                | `binary_sensor.X_dry1_contact`                | DRY1 dry-contact relay closed / open. |
+| `entity_dry2`                | `binary_sensor.X_dry2_contact`                | DRY2 dry-contact relay closed / open. |
+
+The DRY contacts come from jkbms-rs485-addon 4.1.12 and later. The add-on names them after the bare BMS (`binary_sensor.bms_1_dry1_contact`) even where the other sensors carry a longer prefix (`bms_1_bms_…`), so when `binary_sensor.X_dry1_contact` doesn't exist the card also tries each shorter form of the prefix.
 
 ### Temperatures
 
@@ -201,7 +205,7 @@ The card stores voltages internally in V and resistances in Ω. **Voltage units 
 
 ### Status pills
 
-The charge, discharge, balance and heater pills only show when their sensor exists, so a BMS without a heater shows no Heater pill. To hide a pill whose sensor does exist, switch it off (in the editor under *Advanced → Status pills*):
+The charge, discharge, balance, heater and DRY1 / DRY2 pills only show when their sensor exists, so a BMS without a heater shows no Heater pill. To hide a pill whose sensor does exist, switch it off (in the editor under *Advanced → Status pills*):
 
 | Key                   | Default | Description |
 | --------------------- | ------- | ----------- |
@@ -209,6 +213,8 @@ The charge, discharge, balance and heater pills only show when their sensor exis
 | `show_pill_discharge` | `true`  | Discharge switch pill. |
 | `show_pill_balance`   | `true`  | Balance pill (active / ready / off). |
 | `show_pill_heater`    | `true`  | Heater pill. |
+| `show_pill_dry1`      | `true`  | DRY1 dry-contact pill. |
+| `show_pill_dry2`      | `true`  | DRY2 dry-contact pill. |
 
 The same goes for the rest of the card: stat tiles, temperature tiles, and the capacity and SOH lines in the battery only appear for sensors that exist. With only voltage, current and one temperature probe, that's all the card shows. Prefer to see everything, missing sensors included? Turn on `show_missing` (Basic tab: *Also show sensors that don't exist*); a pill you switched off above stays hidden.
 

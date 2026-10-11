@@ -74,6 +74,8 @@ const DEFAULTS = {
   show_pill_discharge: true,
   show_pill_balance: true,
   show_pill_heater: true,
+  show_pill_dry1: true,
+  show_pill_dry2: true,
 };
 
 // LiFePO4 nominal cell voltage, for kWh when no nominal_voltage is set.
@@ -145,6 +147,8 @@ const ADVANCED_SECTIONS = [
       { name: "entity_switch_balance",  selector: ENT_BIN },
       { name: "entity_balance_active",  selector: ENT_BIN },
       { name: "entity_heating",         selector: ENT_BIN },
+      { name: "entity_dry1",            selector: ENT_BIN },
+      { name: "entity_dry2",            selector: ENT_BIN },
     ],
   },
   {
@@ -230,6 +234,8 @@ const ADVANCED_SECTIONS = [
           { name: "show_pill_discharge", selector: { boolean: {} } },
           { name: "show_pill_balance",   selector: { boolean: {} } },
           { name: "show_pill_heater",    selector: { boolean: {} } },
+          { name: "show_pill_dry1",      selector: { boolean: {} } },
+          { name: "show_pill_dry2",      selector: { boolean: {} } },
         ],
       },
     ],
@@ -309,6 +315,8 @@ const LABELS = {
   entity_switch_balance: "Balancer enabled",
   entity_balance_active: "Balancer active now",
   entity_heating: "Heater on",
+  entity_dry1: "DRY1 contact (relay 1)",
+  entity_dry2: "DRY2 contact (relay 2)",
   entity_temp_mos: "MOSFET temperature",
   entity_temp_probe_1: "Probe 1 temperature",
   entity_temp_probe_2: "Probe 2 temperature",
@@ -330,6 +338,8 @@ const LABELS = {
   show_pill_discharge: "Discharge",
   show_pill_balance: "Balance",
   show_pill_heater: "Heater",
+  show_pill_dry1: "DRY1",
+  show_pill_dry2: "DRY2",
   temp_cold: "Blue below (default 5 °C / 41 °F)",
   temp_warm: "Amber from (default 35 °C / 95 °F)",
   temp_hot: "Red from (default 50 °C / 122 °F)",
@@ -1651,6 +1661,20 @@ class BatteryPackCard extends HTMLElement {
     return found || c.alarm_prefix;
   }
 
+  // The add-on names the DRY contacts after the bare BMS (bms_1_dry1_contact)
+  // even when the other sensors carry a longer prefix (bms_1_bms_…), so try
+  // the prefix and then each shorter form of it.
+  _dryDefault(n) {
+    const p = this._config.prefix, st = this._hass?.states;
+    if (!p) return null;
+    const parts = p.split("_");
+    for (let i = parts.length; i > 0 && st; i--) {
+      const id = `binary_sensor.${parts.slice(0, i).join("_")}_dry${n}_contact`;
+      if (st[id]) return id;
+    }
+    return `binary_sensor.${p}_dry${n}_contact`;
+  }
+
   _resolveEntities() {
     const c = this._config;
     const p = c.prefix;
@@ -1682,6 +1706,9 @@ class BatteryPackCard extends HTMLElement {
       balAct:   pick(c.entity_balance_active,  def("balance_action",  "binary_sensor")),
       balAllow: pick(c.entity_switch_balance,  def("switch_balance",  "binary_sensor")),
       heat:     pick(c.entity_heating,         def("heating",         "binary_sensor")),
+      // jkbms-rs485-addon 4.1.12+: live state of the two dry-contact relays.
+      dry1:     pick(c.entity_dry1,            this._dryDefault(1)),
+      dry2:     pick(c.entity_dry2,            this._dryDefault(2)),
       tMos:     pick(c.entity_temp_mos,     def("mos_temp")),
       t1:       pick(c.entity_temp_probe_1, def("sonde_1_temp")),
       t2:       pick(c.entity_temp_probe_2, def("sonde_2_temp")),
@@ -1769,6 +1796,8 @@ class BatteryPackCard extends HTMLElement {
     const balAct = this._on(E.balAct);
     const balAllow = this._on(E.balAllow);
     const heatOn = this._on(E.heat);
+    const dry1On = this._on(E.dry1);
+    const dry2On = this._on(E.dry2);
     // Each pill only when switched on and its entity exists: a "Heater OFF"
     // on a BMS without a heater is misleading.
     const showMissing = cfg.show_missing === true || cfg.show_missing === "true";
@@ -1786,6 +1815,8 @@ class BatteryPackCard extends HTMLElement {
       showPill("balance", E.balAct, E.balAllow) ? this._pill("Balance", balAct ? "ACTIVE" : (balAllow ? "READY" : "OFF"),
                      balAct ? "active" : (balAllow ? "on" : "off"), this._exists(E.balAct) ? E.balAct : E.balAllow) : "",
       showPill("heater", E.heat)   ? this._pill("Heater",    heatOn ? "ON" : "OFF", heatOn ? "alert" : "off", E.heat) : "",
+      showPill("dry1", E.dry1)     ? this._pill("DRY1",      dry1On ? "ON" : "OFF", dry1On ? "on" : "off", E.dry1) : "",
+      showPill("dry2", E.dry2)     ? this._pill("DRY2",      dry2On ? "ON" : "OFF", dry2On ? "on" : "off", E.dry2) : "",
     ].join("");
 
     // Temperature tiles: only for sensors that actually exist in HA. An
