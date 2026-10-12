@@ -1235,17 +1235,19 @@ class BatteryStackedPackCardEditor extends HTMLElement {
     }
   }
 
-  // JK-BMS add-on packs in this HA that aren't in the card yet, with a button
+  // JK-BMS add-on packs and BMS_BLE batteries in this HA that aren't in the card yet, with a button
   // to add them all (Multi-Pack names like pack_1_bms_1 included).
   _updateFound() {
     const box = this.querySelector(".bspc-found");
     const Pack = customElements.get("battery-pack-card");
-    const have = new Set(this._config.packs.map((p) => p && p.prefix).filter(Boolean));
-    this._found = (Pack && Pack.findPacks ? Pack.findPacks(this._hass) : []).filter((f) => !have.has(f.prefix));
+    // An add-on pack by its prefix, a BMS_BLE battery by its device.
+    const key = (p) => p && (p.bms_ble_device ? `ble:${p.bms_ble_device}` : p.prefix);
+    const have = new Set(this._config.packs.map(key).filter(Boolean));
+    this._found = (Pack && Pack.findPacks ? Pack.findPacks(this._hass) : []).filter((f) => !have.has(key(f)));
     box.hidden = !this._found.length;
     if (!this._found.length) return;
     box.querySelector(".bspc-hint").textContent =
-      `In Home Assistant but not in this card: ${this._found.map((f) => f.prefix).join(", ")}.`;
+      `In Home Assistant but not in this card: ${this._found.map((f) => f.prefix || f.name).join(", ")}.`;
     box.querySelector(".bspc-add-found").textContent = `+ Add ${this._found.length === 1 ? "this pack" : `these ${this._found.length} packs`}`;
   }
 
