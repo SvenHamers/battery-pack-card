@@ -68,12 +68,17 @@ const DEFAULTS = {
   // nominal voltage defaults to cells × 3.2 V, LiFePO4's nominal cell voltage.
   capacity_unit: "Ah",
   nominal_voltage: "",
+  // The card takes positive current as charging. Some BMSes (or the way they
+  // reach HA) report it the other way round: this flips current and power.
+  invert_current: false,
   // One switch per status pill. A pill whose entity doesn't exist is hidden
   // regardless, so a BMS without a heater shows no Heater pill.
   show_pill_charge: true,
   show_pill_discharge: true,
   show_pill_balance: true,
   show_pill_heater: true,
+  show_pill_dry1: true,
+  show_pill_dry2: true,
 };
 
 // LiFePO4 nominal cell voltage, for kWh when no nominal_voltage is set.
@@ -145,6 +150,8 @@ const ADVANCED_SECTIONS = [
       { name: "entity_switch_balance",  selector: ENT_BIN },
       { name: "entity_balance_active",  selector: ENT_BIN },
       { name: "entity_heating",         selector: ENT_BIN },
+      { name: "entity_dry1",            selector: ENT_BIN },
+      { name: "entity_dry2",            selector: ENT_BIN },
     ],
   },
   {
@@ -215,6 +222,7 @@ const ADVANCED_SECTIONS = [
             ], mode: "dropdown" } },
           },
           { name: "nominal_voltage", selector: { number: { min: 1, max: 1000, step: 0.1, mode: "box", unit_of_measurement: "V" } } },
+          { name: "invert_current", selector: { boolean: {} } },
         ],
       },
     ],
@@ -230,6 +238,8 @@ const ADVANCED_SECTIONS = [
           { name: "show_pill_discharge", selector: { boolean: {} } },
           { name: "show_pill_balance",   selector: { boolean: {} } },
           { name: "show_pill_heater",    selector: { boolean: {} } },
+          { name: "show_pill_dry1",      selector: { boolean: {} } },
+          { name: "show_pill_dry2",      selector: { boolean: {} } },
         ],
       },
     ],
@@ -309,6 +319,8 @@ const LABELS = {
   entity_switch_balance: "Balancer enabled",
   entity_balance_active: "Balancer active now",
   entity_heating: "Heater on",
+  entity_dry1: "DRY1 contact (relay 1)",
+  entity_dry2: "DRY2 contact (relay 2)",
   entity_temp_mos: "MOSFET temperature",
   entity_temp_probe_1: "Probe 1 temperature",
   entity_temp_probe_2: "Probe 2 temperature",
@@ -326,10 +338,13 @@ const LABELS = {
   temperature_unit: "Temperature unit",
   capacity_unit: "Capacity shown in",
   nominal_voltage: "Nominal pack voltage for kWh (blank = cells × 3.2 V)",
+  invert_current: "Invert current and power (BMS reports charging as negative)",
   show_pill_charge: "Charge",
   show_pill_discharge: "Discharge",
   show_pill_balance: "Balance",
   show_pill_heater: "Heater",
+  show_pill_dry1: "DRY1",
+  show_pill_dry2: "DRY2",
   temp_cold: "Blue below (default 5 °C / 41 °F)",
   temp_warm: "Amber from (default 35 °C / 95 °F)",
   temp_hot: "Red from (default 50 °C / 122 °F)",
@@ -1514,7 +1529,9 @@ class BatteryPackCard extends HTMLElement {
     return {
       name: cfg.name,
       soc: val(E.soc), soh: val(E.soh),
-      voltage: val(E.packV), current: val(E.curA), power: has(E.powW) ? this._watts(E.powW) : null,
+      voltage: val(E.packV),
+      current: has(E.curA) ? this._raw(E.curA) * this._sign() : null,
+      power: has(E.powW) ? this._watts(E.powW) * this._sign() : null,
       cellMin, cellMax,
       capacityRemaining: has(E.capRem) ? this._capacity(E.capRem).ah : null,
       capacityTotal: has(E.capTot) ? this._capacity(E.capTot).ah : null,
@@ -1678,6 +1695,8 @@ class BatteryPackCard extends HTMLElement {
     const u = isTpl(eid) ? "" : String(this._hass?.states[eid]?.attributes?.unit_of_measurement || "").trim();
     return /^kW$/i.test(u) ? v * 1000 : /^MW$/i.test(u) ? v * 1e6 : v;
   }
+  // -1 when the BMS reports charging as negative current (invert_current).
+  _sign() { const v = this._config.invert_current; return v === true || v === "true" ? -1 : 1; }
   _on(eid)    { return /^(on|true)$/i.test(String(this._state(eid))); }
   _raw(eid)   { return parseFloat(this._state(eid)); }
 
@@ -1729,6 +1748,20 @@ class BatteryPackCard extends HTMLElement {
       .sort((a, b) => a.length - b.length)[0];
     this._alarmFound = found || null;
     return found || c.alarm_prefix;
+  }
+
+  // The add-on names the DRY contacts after the bare BMS (bms_1_dry1_contact)
+  // even when the other sensors carry a longer prefix (bms_1_bms_…), so try
+  // the prefix and then each shorter form of it.
+  _dryDefault(n) {
+    const p = this._config.prefix, st = this._hass?.states;
+    if (!p) return null;
+    const parts = p.split("_");
+    for (let i = parts.length; i > 0 && st; i--) {
+      const id = `binary_sensor.${parts.slice(0, i).join("_")}_dry${n}_contact`;
+      if (st[id]) return id;
+    }
+    return `binary_sensor.${p}_dry${n}_contact`;
   }
 
   _resolveEntities() {
@@ -1795,6 +1828,9 @@ class BatteryPackCard extends HTMLElement {
       balAct:   pick(c.entity_balance_active,  def("balance_action",  "binary_sensor")),
       balAllow: pick(c.entity_switch_balance,  def("switch_balance",  "binary_sensor")),
       heat:     pick(c.entity_heating,         def("heating",         "binary_sensor")),
+      // jkbms-rs485-addon 4.1.12+: live state of the two dry-contact relays.
+      dry1:     pick(c.entity_dry1,            this._dryDefault(1)),
+      dry2:     pick(c.entity_dry2,            this._dryDefault(2)),
       tMos:     pick(c.entity_temp_mos,     def("mos_temp")),
       t1:       pick(c.entity_temp_probe_1, def("sonde_1_temp")),
       t2:       pick(c.entity_temp_probe_2, def("sonde_2_temp")),
@@ -1831,9 +1867,9 @@ class BatteryPackCard extends HTMLElement {
     const soc   = this._num(E.soc);
     const soh   = this._num(E.soh);
     const packV = this._num(E.packV);
-    const curA  = this._num(E.curA);
+    const curA  = this._num(E.curA) * this._sign();
     // No power sensor: voltage × current, which is what the BMS would report.
-    const powRaw= this._exists(E.powW) ? this._watts(E.powW) : this._num(E.packV) * this._num(E.curA);
+    const powRaw= this._exists(E.powW) ? this._watts(E.powW) * this._sign() : this._num(E.packV) * curA;
     const powW  = Number.isFinite(powRaw) ? powRaw : 0;
     const balA  = this._num(E.balA);
     const cycles= this._state(E.cycles) || "0";
@@ -1883,6 +1919,8 @@ class BatteryPackCard extends HTMLElement {
     const balAct = this._on(E.balAct);
     const balAllow = this._on(E.balAllow);
     const heatOn = this._on(E.heat);
+    const dry1On = this._on(E.dry1);
+    const dry2On = this._on(E.dry2);
     // Each pill only when switched on and its entity exists: a "Heater OFF"
     // on a BMS without a heater is misleading.
     const showMissing = cfg.show_missing === true || cfg.show_missing === "true";
@@ -1900,6 +1938,8 @@ class BatteryPackCard extends HTMLElement {
       showPill("balance", E.balAct, E.balAllow) ? this._pill("Balance", balAct ? "ACTIVE" : (balAllow ? "READY" : "OFF"),
                      balAct ? "active" : (balAllow ? "on" : "off"), this._exists(E.balAct) ? E.balAct : E.balAllow) : "",
       showPill("heater", E.heat)   ? this._pill("Heater",    heatOn ? "ON" : "OFF", heatOn ? "alert" : "off", E.heat) : "",
+      showPill("dry1", E.dry1)     ? this._pill("DRY1",      dry1On ? "ON" : "OFF", dry1On ? "on" : "off", E.dry1) : "",
+      showPill("dry2", E.dry2)     ? this._pill("DRY2",      dry2On ? "ON" : "OFF", dry2On ? "on" : "off", E.dry2) : "",
     ].join("");
 
     // Temperature tiles: only for sensors that actually exist in HA. An

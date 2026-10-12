@@ -43,6 +43,7 @@ const DEFAULTS = {
   // For kWh from a bank entity in Ah. Blank: the packs' mean nominal voltage,
   // or without packs the bank voltage.
   nominal_voltage: "",
+  invert_current: false,     // BMS reports charging as negative: flip current and power (packs and bank)
   pack_defaults: {},
   packs: [],
 };
@@ -132,7 +133,7 @@ const socColor = (s) => (s > 50 ? "var(--clr-green)" : s > 20 ? "var(--clr-orang
 
 // Every pack's effective battery-pack-card config.
 const packConfigs = (cfg) => (Array.isArray(cfg.packs) ? cfg.packs : []).map((p, i) => {
-  const c = { capacity_unit: cfg.capacity_unit, ...(cfg.pack_defaults || {}), ...(p || {}) };
+  const c = { capacity_unit: cfg.capacity_unit, invert_current: cfg.invert_current, ...(cfg.pack_defaults || {}), ...(p || {}) };
   if (!c.name) c.name = `Pack ${i + 1}`;
   delete c.alerts;   // the stacked card owns the alerts
   return c;
@@ -467,11 +468,13 @@ class BatteryStackedPackCard extends HTMLElement {
     const st = (this._hass && this._hass.states) || {};
     const packs = sums.filter(Boolean);
     const T = {};
+    const inv = c.invert_current === true || c.invert_current === "true";
     for (const [key] of TOTALS) {
       const t = this._total(c[key], st);
       if (!t) continue;
       let n = t.text === null ? parseFloat(t.value) : NaN;
       if (key === "entity_power" && Number.isFinite(n)) n *= /^kW$/i.test(t.unit || "") ? 1000 : /^MW$/i.test(t.unit || "") ? 1e6 : 1;
+      if ((key === "entity_current" || key === "entity_power") && inv) n = -n;
       T[key] = { ...t, n };
     }
     if (!packs.length && !Object.keys(T).length && !EXTRAS.some(([k]) => c[k])) return "";
@@ -909,6 +912,7 @@ const BANK_SCHEMA = [
       { name: "capacity_unit", selector: { select: { mode: "dropdown", options: [{ value: "Ah", label: "Ah (charge)" }, { value: "kWh", label: "kWh (energy)" }] } } },
       { name: "bank_display_size", selector: { select: { mode: "dropdown", options: [{ value: "full", label: "Full" }, { value: "compact", label: "Compact (one line)" }] } } },
       { name: "nominal_voltage", selector: { number: { min: 1, max: 1000, step: 0.1, mode: "box", unit_of_measurement: "V" } } },
+      { name: "invert_current", selector: { boolean: {} } },
     ],
   },
 ];
@@ -924,6 +928,7 @@ const LABELS = {
   capacity_unit: "Capacity shown in",
   bank_display_size: "Bank display",
   nominal_voltage: "Nominal voltage for kWh (blank = from the packs)",
+  invert_current: "Invert current and power, for all packs and the bank",
   entity_capacity_total: "Bank total capacity",
   entity_cell_max: "Highest cell voltage",
   entity_cell_min: "Lowest cell voltage",

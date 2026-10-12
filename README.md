@@ -6,7 +6,7 @@
 
 ![Two batteries side by side](screenshot.png)
 
-A visual Lovelace card for Home Assistant that renders a 4s–32s lithium battery pack — SOC silhouette, six headline stats, status pills for charge / discharge / balance / heater, a colour-coded per-cell array (voltage + internal resistance, tinted by deviation from pack average), min/max/avg/Δ summary line, and a temperature strip. Read-only: it never writes to the BMS.
+A visual Lovelace card for Home Assistant that renders a 4s–32s lithium battery pack — SOC silhouette, six headline stats, status pills for charge / discharge / balance / heater / dry contacts, a colour-coded per-cell array (voltage + internal resistance, tinted by deviation from pack average), min/max/avg/Δ summary line, and a temperature strip. Read-only: it never writes to the BMS.
 
 Every region is clickable and opens the matching entity's more-info dialog.
 
@@ -110,7 +110,7 @@ If you use the JK-BMS RS485 addon, `prefix` is the only required field.
 | `cells`             | integer | `16`                        | Number of series cells to render (4–32).                      |
 | `show_battery`      | bool    | `true`                      | Show the SVG battery silhouette with SOC fill.                |
 | `show_stats`        | bool    | `true`                      | Show the stat tiles (voltage, current, power, balance, cycles, phase). Tiles whose sensor doesn't exist are hidden; without a power sensor, power is voltage × current. |
-| `show_pills`        | bool    | `true`                      | Show charge / discharge / balance / heater status pills. Pills whose sensor doesn't exist are hidden; each can also be switched off, see [Status pills](#status-pills). |
+| `show_pills`        | bool    | `true`                      | Show charge / discharge / balance / heater / DRY1 / DRY2 status pills. Pills whose sensor doesn't exist are hidden; each can also be switched off, see [Status pills](#status-pills). |
 | `show_cells`        | bool    | `true`                      | Show the per-cell voltage + resistance grid.                  |
 | `show_cell_resistance` | bool | `true`                    | Show the internal resistance under each cell's voltage. Hidden anyway when your BMS has no resistance sensors (e.g. Seplos), unless `show_missing` is on. |
 | `show_summary`      | bool    | `true`                      | Show the min / avg / max / Δ summary line.                    |
@@ -174,6 +174,10 @@ cell_voltage_pattern: "{{ states('sensor.pack_cell_{nn}') | float(0) / 1000 }}"
 | `entity_switch_balance`      | `binary_sensor.X_switch_balance`              | Balancer enabled by user.    |
 | `entity_balance_active`      | `binary_sensor.X_balance_action`              | Balancer actively balancing. |
 | `entity_heating`             | `binary_sensor.X_heating`                     | Heating element on / off.    |
+| `entity_dry1`                | `binary_sensor.X_dry1_contact`                | DRY1 dry-contact relay closed / open. |
+| `entity_dry2`                | `binary_sensor.X_dry2_contact`                | DRY2 dry-contact relay closed / open. |
+
+The DRY contacts come from jkbms-rs485-addon 4.1.12 and later. The add-on names them after the bare BMS (`binary_sensor.bms_1_dry1_contact`) even where the other sensors carry a longer prefix (`bms_1_bms_…`), so when `binary_sensor.X_dry1_contact` doesn't exist the card also tries each shorter form of the prefix.
 
 ### Temperatures
 
@@ -236,10 +240,11 @@ The card stores voltages internally in V and resistances in Ω. **Voltage units 
 | `temp_hot`                   | `50` °C / `122` °F | … **red** from this. The three are set in the unit the card shows (`temperature_unit`, or on `auto` Home Assistant's own unit); leave them blank for the defaults. Sorted before use; negative values are fine. |
 | `capacity_unit`              | `Ah`    | Capacity in the battery as charge, `Ah`, or as energy, `kWh` (e.g. `624.0 / 628 Ah` becomes `31.9 / 32.2 kWh` at 51.2 V). A capacity sensor that already reports Wh or kWh is used as is. |
 | `nominal_voltage`            | *(cells × 3.2 V)* | Pack voltage used for kWh = Ah × V. Blank: LiFePO4's 3.2 V per cell, so 51.2 V for 16 cells. Set it for other chemistries, e.g. `58.8` for 16 NMC cells at 3.7 V. |
+| `invert_current`             | `false`           | The card takes positive current as charging. If your BMS reports charging as **negative** (the card then says *discharging* while the battery charges), turn this on: it flips the sign of current and power. |
 
 ### Status pills
 
-The charge, discharge, balance and heater pills only show when their sensor exists, so a BMS without a heater shows no Heater pill. To hide a pill whose sensor does exist, switch it off (in the editor under *Advanced → Status pills*):
+The charge, discharge, balance, heater and DRY1 / DRY2 pills only show when their sensor exists, so a BMS without a heater shows no Heater pill. To hide a pill whose sensor does exist, switch it off (in the editor under *Advanced → Status pills*):
 
 | Key                   | Default | Description |
 | --------------------- | ------- | ----------- |
@@ -247,6 +252,8 @@ The charge, discharge, balance and heater pills only show when their sensor exis
 | `show_pill_discharge` | `true`  | Discharge switch pill. |
 | `show_pill_balance`   | `true`  | Balance pill (active / ready / off). |
 | `show_pill_heater`    | `true`  | Heater pill. |
+| `show_pill_dry1`      | `true`  | DRY1 dry-contact pill. |
+| `show_pill_dry2`      | `true`  | DRY2 dry-contact pill. |
 
 The same goes for the rest of the card: stat tiles, temperature tiles, and the capacity and SOH lines in the battery only appear for sensors that exist. With only voltage, current and one temperature probe, that's all the card shows. Prefer to see everything, missing sensors included? Turn on `show_missing` (Basic tab: *Also show sensors that don't exist*); a pill you switched off above stays hidden.
 
@@ -413,6 +420,7 @@ Each pack's screen shows its SOC (with a bar), voltage, current, cell Δ and its
 | `entity_capacity_remaining` | entity or template | — | Bank remaining capacity (Rem-Capacity). Blank: the packs' sum. |
 | `entity_capacity_total`     | entity or template | — | Bank total capacity (Bat-Capacity). Blank: the packs' sum. |
 | `nominal_voltage`           | number  | —              | Voltage used to turn a bank capacity in Ah into kWh (with `capacity_unit: kWh`). Blank: the packs' mean nominal voltage, or without packs the bank voltage. |
+| `invert_current`            | bool    | `false`        | Flip the sign of current and power for all packs and for the bank's `entity_current` / `entity_power`, for a BMS that reports charging as negative. A pack (or `pack_defaults`) can still set its own. |
 
 The bank totals show on a **bank display** built into the top of the cabinet, styled after the JK BMS screen: voltage and current on top, the SOC in a ring next to the bank's total and remaining capacity, and below that the highest and lowest cell, the warmest temperature, the power in kW, the alarm state, the number of packs and the charge / discharge switches.
 
@@ -447,7 +455,7 @@ If the card says an older Battery Pack Card is loaded, the browser loads a secon
 
 ## Conventions
 
-- **Charge / discharge direction:** derived from the **current** sensor, not power. Many BMS integrations report power as an unsigned magnitude, so the card uses current's sign: positive current = charging (energy into the battery), negative = discharging. Make sure `entity_current` points at a signed sensor.
+- **Charge / discharge direction:** derived from the **current** sensor, not power. Many BMS integrations report power as an unsigned magnitude, so the card uses current's sign: positive current = charging (energy into the battery), negative = discharging. Make sure `entity_current` points at a signed sensor. Charging shown as discharging? Your BMS counts the other way round: set `invert_current: true`.
 - **Cell colouring:** cells are tinted by their offset from the pack's average voltage — by default green ≤ 2 mV, yellow ≤ 5, orange ≤ 10, red beyond. The bands are configurable, see [Cell colouring thresholds](#cell-colouring-thresholds). The lowest and highest cells get a red and green halo respectively (reversed with `max_cell_red: true`).
 - **Click-to-detail:** every visible element (battery, stat tile, pill, individual cell, temperature tile, alarm badge) opens HA's standard entity-detail dialog.
 - **Read-only:** the card never writes to the BMS. All `number.*` and `switch.*` settings entities are deliberately ignored. The only thing it ever writes is its own alert automations, when you switch alerts on.
