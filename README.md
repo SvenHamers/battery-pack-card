@@ -14,44 +14,6 @@ Every region is clickable and opens the matching entity's more-info dialog.
 
 **Lots of batteries, not much screen?** A full card per pack quickly fills a dashboard, especially on a phone or wall tablet. The same install also brings a second card, [**Battery Stacked Pack Card**](#battery-stacked-pack-card): all packs at a glance, drawn as battery cases stacked in a cabinet, and tapping one opens its full Battery Pack Card. Pick it under "Add card" like any other card.
 
-## BMS_BLE-HA batteries
-
-[BMS_BLE-HA](https://github.com/patman15/BMS_BLE-HA) batteries using the
-`<prefix>_battery`, `<prefix>_voltage` and `<prefix>_delta_voltage` naming scheme
-are discovered alongside JK RS485 packs in the editor and stacked card.
-For example:
-
-```yaml
-type: custom:battery-pack-card
-name: BLE Battery
-prefix: jhb_example
-show_cell_resistance: false
-```
-
-Use the entity prefix (the part before `_battery` in the SOC entity ID), not
-its integration unique ID. With exactly one BLE battery, a manually configured
-card can omit `prefix`. With multiple batteries, choose a prefix explicitly.
-Renamed entities can still be configured with the existing `entity_*` overrides.
-
-The card reads cells from the delta-voltage sensor's `cell_voltages` attribute
-(`Cell voltages` is also accepted), derives the mean and lowest/highest cell
-numbers, and detects cell count when `cells` is omitted. MOSFET status and
-balancer activity use the `charge_mosfet`, `discharge_mosfet` and `balancer`
-binary sensors. Numeric runtime is formatted as days, hours and minutes.
-Unsupported metrics, such as cell resistance, stay hidden by default.
-
-For temperature arrays whose first reading is the MOSFET followed by four
-probes, the card maps indices 0–4 automatically. The `temperature_sensors`
-attribute may contain integration `TempSensor` objects that cannot be JSON
-serialized. The card uses its existing Home Assistant live-template
-subscriptions to convert each reading with `float(none)`. No separate template
-sensors or YAML templates are required. Raw attribute temperatures are taken as
-Celsius and converted according to `temperature_unit` / Home Assistant's unit
-system. Different probe ordering can use the existing temperature overrides.
-
-JK RS485 defaults remain unchanged. Discovery is based on entity naming, so
-other BLE naming schemes require manual overrides.
-
 ## Works out of the box with…
 
 …the [**jean-luc1203/jkbms-rs485-addon**](https://github.com/jean-luc1203/jkbms-rs485-addon) integration. The Basic configuration only needs a `prefix:` and you're done — all sensors, binary sensors, cell entities, temperatures and the alarm signals are derived automatically from that prefix and match the addon's default entity naming.
@@ -60,6 +22,24 @@ other BLE naming schemes require manual overrides.
 - **Multi-Pack ready.** In the add-on's upcoming Multi-Pack mode the pack is part of the name (`pack_1_bms_1`, `pack_2_bms_1`, …); that's just another prefix, e.g. `prefix: pack_1_bms_1`. The alarm entities are found automatically whether they follow the classic `<prefix>_<prefix>` naming or a new one; existing setups keep working exactly as before.
 
 Using a different BMS? Use the **Advanced** tab to point each field at your own entities — every value on the card is independently overridable, including each individual cell.
+
+## BMS_BLE-HA batteries (Bluetooth)
+
+*Since 1.12.0 (beta).* Batteries read over Bluetooth by the [**BMS_BLE-HA**](https://github.com/patman15/BMS_BLE-HA) integration (JBD, Daly, JK, Seplos, EG4, … BMSes) work too. In the editor, pick the battery under **Or a BMS_BLE battery (Bluetooth)**: the card finds its entities by itself, takes over its name and cell count, and that's it. In YAML:
+
+```yaml
+type: custom:battery-pack-card
+bms_ble_device: 0123456789abcdef0123456789abcdef   # the battery's device id; easiest picked in the editor
+```
+
+- **Found by device, not by name.** The entities are recognised by what they are (the integration tells Home Assistant), so renamed entities, every BMS_BLE version (some entity ids changed in 2025 and 2026) and every Home Assistant language work.
+- **Cells and temperatures** come from the lists BMS_BLE puts on its *Delta cell voltage* and *Temperature* sensors. The MOSFET temperature is recognised as such; the other sensors become probes 1–4.
+- **Lowest / highest cell** and their numbers come from the cells; **runtime** shows as `5h 30m`; the alarm badge follows the battery's *Problem* sensor; capacity shows what's left (and the total when the BMS reports its design capacity).
+- The *Charge MOSFET*, *Discharge MOSFET*, *Balancer* and *Heater* sensors are disabled in BMS_BLE by default; enable them in Home Assistant and their pills appear.
+- Every value can still be overridden with the usual `entity_*` settings.
+- On the **Battery Stacked Pack Card**, BMS_BLE batteries are offered under *Packs found* next to JK add-on packs, and a bank can mix both.
+
+Only cards with `bms_ble_device` set do any of this; every other card works exactly as before. Thanks to @mohrerao for the idea and the first version (#19).
 
 ## Install
 
@@ -105,6 +85,7 @@ If you use the JK-BMS RS485 addon, `prefix` is the only required field.
 | Option              | Type    | Default                     | Description                                                   |
 | ------------------- | ------- | --------------------------- | ------------------------------------------------------------- |
 | `prefix`            | string  | —                           | Entity prefix (e.g. `bms_master`). Optional if every `entity_*` override below is set instead. |
+| `bms_ble_device`    | string  | —                           | A [BMS_BLE-HA](#bms_ble-ha-batteries-bluetooth) battery (its device id) instead of a prefix. |
 | `name`              | string  | `<prefix>`                  | Title shown in the card header.                               |
 | `alarm_prefix`      | string  | `<prefix>_<prefix>`         | Prefix for `*_alarm_status` / `*_alarm_active`. Blank: `<prefix>_<prefix>` when that exists, otherwise the card looks for alarm entities belonging to the prefix (e.g. with the add-on's Multi-Pack naming). |
 | `cells`             | integer | `16`                        | Number of series cells to render (4–32).                      |
