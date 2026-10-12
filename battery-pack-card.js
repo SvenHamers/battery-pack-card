@@ -509,17 +509,36 @@ const isFahrenheit = (u) => /^\s*°?\s*F\s*$/i.test(String(u || "")) || u === "�
 // Packs of the JK-BMS RS485 add-on in this Home Assistant, found by their
 // SOC sensor: the classic naming ("bms_master", "bms_1") and Multi-Pack's
 // pack-aware one ("pack_1_bms_1") alike, in natural order.
+// Cell arrays arrive in HA state attributes. TempSensor values are converted
+// by HA through live templates because those objects cannot be JSON encoded.
+const bleList = (hass, eid, kind) => {
+  const state = hass?.states?.[eid];
+  if (!state || /^(unknown|unavailable)$/i.test(state.state)) return [];
+  const attrs = state.attributes || {};
+  const names = kind === "cells" ? ["cell_voltages", "Cell voltages"]
+    : ["temperature_sensors", "Temperature sensors", "temp_sensors"];
+  const value = names.map(k => attrs[k]).find(Array.isArray);
+  return value || [];
+};
+const blePrefixes = (hass) => Object.keys(hass?.states || {})
+  .map(id => /^sensor\.(.+)_battery$/.exec(id)).filter(Boolean).map(m => m[1])
+  .filter(p => hass.states[`sensor.${p}_voltage`] && hass.states[`sensor.${p}_delta_voltage`])
+  .sort();
+const bleNumber = value => (typeof value === "number" ||
+  (typeof value === "string" && value.trim())) && Number.isFinite(Number(value)) ? Number(value) : NaN;
 const findPrefixes = (hass) => {
   const st = (hass && hass.states) || {};
-  return Object.keys(st)
+  return [...new Set([...blePrefixes(hass), ...Object.keys(st)
     .map((id) => /^sensor\.(.+)_soc_pourcentage$/.exec(id))
     .filter(Boolean).map((m) => m[1])
     .filter((p) => st[`sensor.${p}_tension_totale_volt`] || st[`sensor.${p}_cell_1_volt`])
-    .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+    ])].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
 };
 // Number of cells a pack has, from its cell voltage sensors.
 const countCells = (hass, prefix) => {
   const st = (hass && hass.states) || {};
+  const cells = bleList(hass, `sensor.${prefix}_delta_voltage`, "cells");
+  if (cells.length) return cells.length;
   let n = 0;
   while (n < 32 && st[`sensor.${prefix}_cell_${n + 1}_volt`]) n++;
   return n;
@@ -857,7 +876,7 @@ const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch (e) { /* pri
 class BatteryPackCard extends HTMLElement {
   static get alerts() { return ALERTS_API; }
   static getStubConfig(hass) {
-    // Start from the first pack the JK-BMS add-on has in this Home Assistant
+    // Start from the first JK add-on or BLE pack in this Home Assistant
     // (any naming); the alarm entities are then found by the card itself.
     const p = findPrefixes(hass)[0];
     if (p) return { prefix: p, name: prefixName(p), cells: countCells(hass, p) || 16 };
@@ -869,7 +888,7 @@ class BatteryPackCard extends HTMLElement {
     };
   }
 
-  // For the stacked card and the editors: every add-on pack in this HA.
+  // For the stacked card and the editors: every supported pack in this HA.
   static findPacks(hass) {
     return findPrefixes(hass).map((p) => ({ prefix: p, name: prefixName(p), cells: countCells(hass, p) || 16 }));
   }
@@ -888,6 +907,8 @@ class BatteryPackCard extends HTMLElement {
       merged.alarm_prefix = `${merged.prefix}_${merged.prefix}`;
     }
     this._alarmFound = undefined;
+    this._explicitCells = Object.prototype.hasOwnProperty.call(config, "cells");
+    this._blePrefix = null;
     this._config = merged;
     if (!this._root) this._setup();
     this._syncInfo();
@@ -950,6 +971,15 @@ class BatteryPackCard extends HTMLElement {
 
   set hass(hass) {
     this._hass = hass;
+    const candidates = blePrefixes(hass);
+    const requested = this._config?.prefix;
+    // Never choose arbitrarily when more than one BLE battery is present.
+    this._blePrefix = candidates.includes(requested) ? requested
+      : (!requested && candidates.length === 1 ? candidates[0] : null);
+    if (this._blePrefix && !this._explicitCells) {
+      const n = countCells(hass, this._blePrefix);
+      if (n) this._config.cells = n;
+    }
     this._syncInfo();
     this._syncCfgTemplates();
     this._queueRender();
@@ -971,8 +1001,9 @@ class BatteryPackCard extends HTMLElement {
   // screen. Cheap to call on every update: a signature short-circuits it.
   _syncCfgTemplates() {
     this._cfgTpl = this._cfgTpl || new TemplateSubs(() => this._queueRender());
-    if (this._config && this._cfgTplFor !== this._config) {   // only changes with the config
+    if (this._config && (this._cfgTplFor !== this._config || this._cfgTplPrefix !== this._blePrefix)) {   // only changes with the config
       this._cfgTplFor = this._config;
+      this._cfgTplPrefix = this._blePrefix;
       const all = new Set();
       Object.values(this._resolveEntities()).forEach((v) => { if (typeof v === "string" && isTpl(v)) all.add(v); });
       for (let n = 1; n <= (this._config.cells || 0); n++) {
@@ -1509,6 +1540,22 @@ class BatteryPackCard extends HTMLElement {
     const cfg = this._config, E = this._resolveEntities();
     const expr = (eid) => {
       if (!eid || !this._exists(eid)) return null;
+      const temp = this._bleTempRefs?.get(eid);
+      if (temp) {
+        const list = `(state_attr('${temp.source}', 'temperature_sensors') or [])`;
+        const raw = `((${list}[${temp.index}] | float(none)) if has_value('${temp.source}') and ${list} | count > ${temp.index} else none)`;
+        // Alerts compare in HA's temperature unit; raw BLE attributes are °C.
+        return isFahrenheit(this._hass.config?.unit_system?.temperature)
+          ? `((${raw}) * 9 / 5 + 32 if (${raw}) is number else none)` : raw;
+      }
+      if (eid.includes("#ble:")) {
+        const [source, spec] = eid.split("#ble:");
+        const [kind, index] = spec.split(":");
+        if (kind !== "cell") return null;
+        const attrs = `state_attr('${source}', 'cell_voltages') or state_attr('${source}', 'Cell voltages') or []`;
+        const list = `(${attrs})`;
+        return `((${list}[${index}] | float(none)) if has_value('${source}') and ${list} | count > ${index} else none)`;
+      }
       if (!isTpl(eid)) return `states('${eid}')`;
       const m = /^\s*\{\{([\s\S]*)\}\}\s*$/.exec(eid);
       return m && !/\{\{|\}\}|\{%|\{#/.test(m[1]) ? `(${m[1].trim()})` : null;
@@ -1555,13 +1602,27 @@ class BatteryPackCard extends HTMLElement {
   // once Home Assistant has rendered it (see _syncCfgTemplates).
   _state(eid) {
     if (!eid) return undefined;
+    if (eid.includes("#ble:")) {
+      const [source, spec] = eid.split("#ble:");
+      const [kind, index] = spec.split(":");
+      const values = bleList(this._hass, source, kind === "temp" ? "temp" : "cells");
+      if (kind === "cell" || kind === "temp") return bleNumber(values[Number(index)]);
+      const valid = values.map(bleNumber).filter(v => Number.isFinite(v) && v > 0);
+      if (!valid.length) return undefined;
+      if (kind === "mean") return valid.reduce((a,b) => a+b, 0) / valid.length;
+      const target = kind === "minIndex" ? Math.min(...valid) : Math.max(...valid);
+      return values.findIndex(v => bleNumber(v) === target) + 1;
+    }
     if (isTpl(eid)) {
       const e = this._cfgTpl && this._cfgTpl.get(eid);
       return e && !e.error && e.result !== undefined ? tplText(e.result) : undefined;
     }
     return this._hass?.states[eid]?.state;
   }
-  _exists(eid){ return isTpl(eid) ? this._state(eid) !== undefined : !!(eid && this._hass?.states[eid]); }
+  _exists(eid) {
+    if (eid?.includes("#ble:")) return Number.isFinite(this._state(eid));
+    return isTpl(eid) ? this._state(eid) !== undefined : !!(eid && this._hass?.states[eid]);
+  }
   _num(eid)   { const v = parseFloat(this._state(eid)); return Number.isFinite(v) ? v : 0; }
   // Power in W, whatever unit the entity reports it in (W, kW, MW): a
   // 3.25 kW sensor read as a bare number showed as "3 W". A template's
@@ -1590,6 +1651,25 @@ class BatteryPackCard extends HTMLElement {
     const z = (x) => (Number.isFinite(x) ? x : 0);
     if (this._config.capacity_unit === "kWh") return `${fmt(z(r.kwh), 1)} / ${fmt(z(t.kwh), 1)} kWh`;
     return `${fmt(z(r.ah), 1)} / ${fmt(z(t.ah), 0)} Ah`;
+  }
+
+  _runtimeText(eid) {
+    const value = this._state(eid);
+    if (value == null || /^(unknown|unavailable|none)$/i.test(String(value))) return "—";
+    // Legacy add-on values and explicit overrides remain untouched.
+    // BLE runtime is in hours unless the entity supplies another unit.
+    if (!this._blePrefix || orNull(this._config.entity_runtime) || String(value).trim() === "" || !Number.isFinite(Number(value))) return String(value);
+    const n = Number(value);
+    if (n < 0) return "—";
+    const unit = String(this._hass?.states?.[eid]?.attributes?.unit_of_measurement || "h").toLowerCase();
+    const factor = ["s", "sec", "seconds"].includes(unit) ? 1 / 60
+      : ["min", "minutes"].includes(unit) ? 1 : ["d", "days"].includes(unit) ? 1440 : 60;
+    // Round the total first so a minute cannot overflow to 60m.
+    const total = Math.round(n * factor);
+    const days = Math.floor(total / 1440);
+    const hours = Math.floor(total % 1440 / 60);
+    const minutes = total % 60;
+    return [days ? `${days}d` : "", hours ? `${hours}h` : "", minutes || !total ? `${minutes}m` : ""].filter(Boolean).join(" ");
   }
 
   _watts(eid) {
@@ -1653,6 +1733,39 @@ class BatteryPackCard extends HTMLElement {
 
   _resolveEntities() {
     const c = this._config;
+    this._bleTempRefs = new Map();
+    const bp = this._blePrefix || (blePrefixes(this._hass).includes(c.prefix) ? c.prefix : null);
+    if (bp) {
+      const sensor = suffix => `sensor.${bp}_${suffix}`;
+      const binary = suffix => `binary_sensor.${bp}_${suffix}`;
+      const cells = sensor("delta_voltage");
+      const temp = sensor("temperature");
+      // TempSensor implements float(), but is not JSON serializable. Ask HA
+      // to convert each value using the existing live-template mechanism.
+      const tempAt = index => {
+        const template = `{# battery-pack-card BLE temperature (C) #}
+{% set t = state_attr('${temp}', 'temperature_sensors') | default([], true) %}
+{{ (t[${index}] | float(none)) if has_value('${temp}') and t is sequence and t is not string and t | count > ${index} else none }}`;
+        this._bleTempRefs.set(template, { source: temp, index });
+        return template;
+      };
+      const defaults = {
+        soc: sensor("battery"), packV: sensor("voltage"), curA: sensor("current"), powW: sensor("power"),
+        cycles: sensor("cycles"), runtime: sensor("runtime"), vMin: sensor("minimal_cell_voltage"),
+        vMax: sensor("maximal_cell_voltage"), vDelta: cells, vAvg: `${cells}#ble:mean`,
+        minCell: `${cells}#ble:minIndex`, maxCell: `${cells}#ble:maxIndex`,
+        chg: binary("charge_mosfet"), dch: binary("discharge_mosfet"), balAct: binary("balancer"),
+        tMos: tempAt(0), t1: tempAt(1), t2: tempAt(2),
+        t3: tempAt(3), t4: tempAt(4),
+      };
+      const keys = {soc:"soc",soh:"soh",packV:"pack_voltage",curA:"current",powW:"power",balA:"balance_current",
+        cycles:"cycles",capRem:"capacity_remaining",capTot:"capacity_total",runtime:"runtime",phase:"charge_phase",
+        vAvg:"cell_voltage_avg",vMin:"cell_voltage_min",vMax:"cell_voltage_max",vDelta:"cell_voltage_delta",
+        minCell:"cell_min_number",maxCell:"cell_max_number",alarmS:"alarm_status",alarmB:"alarm_active",
+        chg:"switch_charge",dch:"switch_discharge",balAct:"balance_active",balAllow:"switch_balance",heat:"heating",
+        tMos:"temp_mos",t1:"temp_probe_1",t2:"temp_probe_2",t3:"temp_probe_3",t4:"temp_probe_4"};
+      return Object.fromEntries(Object.entries(keys).map(([key, cfg]) => [key, pick(c[`entity_${cfg}`], defaults[key])]));
+    }
     const p = c.prefix;
     const ap = this._alarmBase();
     const def = (suf, dom = "sensor") => (p ? `${dom}.${p}_${suf}` : null);
@@ -1704,6 +1817,7 @@ class BatteryPackCard extends HTMLElement {
         .replace(/\{nn\}/g, String(n).padStart(2, "0"))
         .replace(/\{n\}/g, n);
     }
+    if (this._blePrefix) return kind === "v" ? `sensor.${this._blePrefix}_delta_voltage#ble:cell:${n-1}` : null;
     // 3. prefix-derived default
     if (!c.prefix) return null;
     return `sensor.${c.prefix}_cell_${n}_${suffix}`;
@@ -1723,7 +1837,7 @@ class BatteryPackCard extends HTMLElement {
     const powW  = Number.isFinite(powRaw) ? powRaw : 0;
     const balA  = this._num(E.balA);
     const cycles= this._state(E.cycles) || "0";
-    const runtime= this._state(E.runtime) || "";
+    const runtime= this._runtimeText(E.runtime);
     // Voltage units are read off the data (see MV_CUTOFF); the configured
     // units only apply until a reading is available.
     const cellRaw = [];
@@ -1892,6 +2006,8 @@ class BatteryPackCard extends HTMLElement {
 
   // Clicking a templated value opens the first entity the template reads.
   _dataE(eid) {
+    if (eid?.includes("#ble:")) eid = eid.split("#ble:")[0];
+    if (this._bleTempRefs?.has(eid)) eid = this._bleTempRefs.get(eid).source;
     if (isTpl(eid)) { const e = this._cfgTpl && this._cfgTpl.get(eid); eid = e && e.entities[0]; }
     return eid ? `data-entity="${this._esc(eid)}"` : "";
   }
@@ -1954,7 +2070,7 @@ class BatteryPackCard extends HTMLElement {
     for (let n = 1; n <= N; n++) {
       const ev = this._cellEntity("v", n);
       const er = this._cellEntity("r", n);
-      const v = this._num(ev) * vSc;       // → volts
+      const v = (ev?.includes("#ble:") ? this._raw(ev) : this._num(ev)) * vSc;       // → volts
       const r = this._num(er) * rSc;       // → ohms
       const devMv = Math.round(Math.abs(v - vAvg) * 1e6) / 1000; // mV, rounded to 1 µV
       let cls = "ok";
@@ -1990,11 +2106,14 @@ class BatteryPackCard extends HTMLElement {
     const val = Number.isFinite(raw) ? raw : null;
     // Work in °C for the colour bands; a template's result is taken to be in
     // HA's own unit, since that's what states() returns for converted sensors.
-    const unit = isTpl(entityId)
+    const unit = (entityId?.includes("#ble:") || entityId?.includes("{# battery-pack-card BLE temperature (C) #}")) ? "°C" : isTpl(entityId)
       ? this._hass?.config?.unit_system?.temperature
       : this._hass?.states[entityId]?.attributes?.unit_of_measurement;
     const c = val === null ? null : isFahrenheit(unit) ? (val - 32) * 5 / 9 : val;
-    const want = String(this._config.temperature_unit || "auto").toUpperCase();
+    let want = String(this._config.temperature_unit || "auto").toUpperCase();
+    if (want === "AUTO" && this._bleTempRefs?.has(entityId)) {
+      want = isFahrenheit(this._hass?.config?.unit_system?.temperature) ? "F" : "C";
+    }
     const shown = c === null ? null : want === "F" ? c * 9 / 5 + 32 : want === "C" ? c : val;
     // Bands are set in the unit the card shows: the chosen one, or on "auto"
     // Home Assistant's own (what the user sees everywhere else).

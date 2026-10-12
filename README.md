@@ -14,6 +14,44 @@ Every region is clickable and opens the matching entity's more-info dialog.
 
 **Lots of batteries, not much screen?** A full card per pack quickly fills a dashboard, especially on a phone or wall tablet. The same install also brings a second card, [**Battery Stacked Pack Card**](#battery-stacked-pack-card): all packs at a glance, drawn as battery cases stacked in a cabinet, and tapping one opens its full Battery Pack Card. Pick it under "Add card" like any other card.
 
+## BMS_BLE-HA batteries
+
+[BMS_BLE-HA](https://github.com/patman15/BMS_BLE-HA) batteries using the
+`<prefix>_battery`, `<prefix>_voltage` and `<prefix>_delta_voltage` naming scheme
+are discovered alongside JK RS485 packs in the editor and stacked card.
+For example:
+
+```yaml
+type: custom:battery-pack-card
+name: BLE Battery
+prefix: jhb_example
+show_cell_resistance: false
+```
+
+Use the entity prefix (the part before `_battery` in the SOC entity ID), not
+its integration unique ID. With exactly one BLE battery, a manually configured
+card can omit `prefix`. With multiple batteries, choose a prefix explicitly.
+Renamed entities can still be configured with the existing `entity_*` overrides.
+
+The card reads cells from the delta-voltage sensor's `cell_voltages` attribute
+(`Cell voltages` is also accepted), derives the mean and lowest/highest cell
+numbers, and detects cell count when `cells` is omitted. MOSFET status and
+balancer activity use the `charge_mosfet`, `discharge_mosfet` and `balancer`
+binary sensors. Numeric runtime is formatted as days, hours and minutes.
+Unsupported metrics, such as cell resistance, stay hidden by default.
+
+For temperature arrays whose first reading is the MOSFET followed by four
+probes, the card maps indices 0–4 automatically. The `temperature_sensors`
+attribute may contain integration `TempSensor` objects that cannot be JSON
+serialized. The card uses its existing Home Assistant live-template
+subscriptions to convert each reading with `float(none)`. No separate template
+sensors or YAML templates are required. Raw attribute temperatures are taken as
+Celsius and converted according to `temperature_unit` / Home Assistant's unit
+system. Different probe ordering can use the existing temperature overrides.
+
+JK RS485 defaults remain unchanged. Discovery is based on entity naming, so
+other BLE naming schemes require manual overrides.
+
 ## Works out of the box with…
 
 …the [**jean-luc1203/jkbms-rs485-addon**](https://github.com/jean-luc1203/jkbms-rs485-addon) integration. The Basic configuration only needs a `prefix:` and you're done — all sensors, binary sensors, cell entities, temperatures and the alarm signals are derived automatically from that prefix and match the addon's default entity naming.
