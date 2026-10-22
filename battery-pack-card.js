@@ -1831,6 +1831,7 @@ class BatteryPackCard extends HTMLElement {
       t2:       pick(c.entity_temp_probe_2, t.t2),
       t3:       pick(c.entity_temp_probe_3, t.t3),
       t4:       pick(c.entity_temp_probe_4, t.t4),
+      tAmb:     pick(c.entity_temp_ambient, null),
     };
   }
 
