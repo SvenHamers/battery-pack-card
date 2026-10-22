@@ -139,6 +139,13 @@
       <option value="1">Yes</option>
     </select>
 
+    <label for="source">Source</label>
+    <select id="source">
+      <option value="jk" selected>Entities (JK-style)</option>
+      <option value="ble">BMS_BLE-HA battery (bms_ble_device)</option>
+    </select>
+    <div class="hint">BMS_BLE: a 4-cell battery found through the entity registry, cells and temperatures from attribute lists.</div>
+
     <label for="alerts">Alerts</label>
     <select id="alerts">
       <option value="off" selected>Not set</option>
@@ -312,9 +319,23 @@
       set("sensor.test_temp_p4",  "23.9");
       set("sensor.test_temp_ambient", "19.5");
 
+      // A BMS_BLE-HA battery: one device, its entities in hass.entities.
+      const entities = {}, devices = { ble_dev: { id: "ble_dev", name: "JBD Garage" } };
+      const ble = (eid, tk, v, a) => { states[eid] = { entity_id: eid, state: String(v), attributes: a }; entities[eid] = { entity_id: eid, device_id: "ble_dev", platform: "bms_ble", translation_key: tk }; };
+      ble("sensor.jbd_garage_battery", undefined, 76, { unit_of_measurement: "%", device_class: "battery" });
+      ble("sensor.jbd_garage_voltage", undefined, 13.21, { unit_of_measurement: "V", device_class: "voltage" });
+      ble("sensor.jbd_garage_current", "current", -4.2, { unit_of_measurement: "A", device_class: "current" });
+      ble("sensor.jbd_garage_power", undefined, -55.5, { unit_of_measurement: "W", device_class: "power" });
+      ble("sensor.jbd_garage_stored_energy", undefined, 1015, { unit_of_measurement: "Wh", device_class: "energy_storage" });
+      ble("sensor.jbd_garage_cycles", "cycles", 12, {});
+      ble("sensor.jbd_garage_runtime", "runtime", 5.5, { unit_of_measurement: "h", device_class: "duration" });
+      ble("sensor.jbd_garage_delta_cell_voltage", "delta_cell_voltage", 0.013, { unit_of_measurement: "V", device_class: "voltage", cell_voltages: [3.301, 3.305, 3.299, 3.312] });
+      ble("sensor.jbd_garage_temperature", undefined, 31.5, { unit_of_measurement: "°C", device_class: "temperature", temperature_sensors: [{ value: 24.1, type: 1 }, { value: 31.5, type: 4 }, { value: 23.9, type: 1 }] });
+      ble("sensor.jbd_garage_battery_health", "battery_health", 97, { unit_of_measurement: "%" });
+      ble("binary_sensor.jbd_garage_problem", undefined, opts.alarm === "1" ? "on" : "off", { device_class: "problem" });
       window.__harnessStates = states;
       setTimeout(() => window.__rerenderTemplates && window.__rerenderTemplates(), 0);
-      return { states, user: { name: "Tester", is_admin: opts.infouser === "admin" }, connection: mockConnection(opts.infouser), callWS: mockCallWS(opts.infouser),
+      return { states, entities, devices, user: { name: "Tester", is_admin: opts.infouser === "admin" }, connection: mockConnection(opts.infouser), callWS: mockCallWS(opts.infouser),
                config: { unit_system: { temperature: "°C" } }, callApi: mockCallApi,
                services: { notify: { mobile_app_phone: {}, telegram: {}, persistent_notification: {} } } };
     }
@@ -332,6 +353,7 @@
     }
 
     function buildConfig(opts) {
+      if (document.getElementById("source").value === "ble") return { name: "JBD Garage", bms_ble_device: "ble_dev" };
       const placeholder = opts.pad === "nn" ? "{nn}" : "{n}";
       return {
         name: "Test Pack",

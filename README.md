@@ -23,6 +23,24 @@ Every region is clickable and opens the matching entity's more-info dialog.
 
 Using a different BMS? Use the **Advanced** tab to point each field at your own entities — every value on the card is independently overridable, including each individual cell.
 
+## BMS_BLE-HA batteries (Bluetooth)
+
+*Since 1.12.0 (beta).* Batteries read over Bluetooth by the [**BMS_BLE-HA**](https://github.com/patman15/BMS_BLE-HA) integration (JBD, Daly, JK, Seplos, EG4, … BMSes) work too. In the editor, pick the battery under **Or a BMS_BLE battery (Bluetooth)**: the card finds its entities by itself, takes over its name and cell count, and that's it. In YAML:
+
+```yaml
+type: custom:battery-pack-card
+bms_ble_device: 0123456789abcdef0123456789abcdef   # the battery's device id; easiest picked in the editor
+```
+
+- **Found by device, not by name.** The entities are recognised by what they are (the integration tells Home Assistant), so renamed entities, every BMS_BLE version (some entity ids changed in 2025 and 2026) and every Home Assistant language work.
+- **Cells and temperatures** come from the lists BMS_BLE puts on its *Delta cell voltage* and *Temperature* sensors. The MOSFET temperature is recognised as such; the other sensors become probes 1–4.
+- **Lowest / highest cell** and their numbers come from the cells; **runtime** shows as `5h 30m`; the alarm badge follows the battery's *Problem* sensor; capacity shows what's left (and the total when the BMS reports its design capacity).
+- The *Charge MOSFET*, *Discharge MOSFET*, *Balancer* and *Heater* sensors are disabled in BMS_BLE by default; enable them in Home Assistant and their pills appear.
+- Every value can still be overridden with the usual `entity_*` settings.
+- On the **Battery Stacked Pack Card**, BMS_BLE batteries are offered under *Packs found* next to JK add-on packs, and a bank can mix both.
+
+Only cards with `bms_ble_device` set do any of this; every other card works exactly as before. Thanks to @mohrerao for the idea and the first version (#19).
+
 ## Install
 
 ### Via HACS (recommended)
@@ -67,6 +85,7 @@ If you use the JK-BMS RS485 addon, `prefix` is the only required field.
 | Option              | Type    | Default                     | Description                                                   |
 | ------------------- | ------- | --------------------------- | ------------------------------------------------------------- |
 | `prefix`            | string  | —                           | Entity prefix (e.g. `bms_master`). Optional if every `entity_*` override below is set instead. |
+| `bms_ble_device`    | string  | —                           | A [BMS_BLE-HA](#bms_ble-ha-batteries-bluetooth) battery (its device id) instead of a prefix. |
 | `name`              | string  | `<prefix>`                  | Title shown in the card header.                               |
 | `alarm_prefix`      | string  | `<prefix>_<prefix>`         | Prefix for `*_alarm_status` / `*_alarm_active`. Blank: `<prefix>_<prefix>` when that exists, otherwise the card looks for alarm entities belonging to the prefix (e.g. with the add-on's Multi-Pack naming). |
 | `cells`             | integer | `16`                        | Number of series cells to render (4–32).                      |
