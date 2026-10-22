@@ -23,7 +23,7 @@ Using a different BMS? Use the **Advanced** tab to point each field at your own 
 
 ## BMS_BLE-HA batteries (Bluetooth)
 
-*Since 1.12.0 (beta).* Batteries read over Bluetooth by the [**BMS_BLE-HA**](https://github.com/patman15/BMS_BLE-HA) integration (JBD, Daly, JK, Seplos, EG4, … BMSes) work too. In the editor, pick the battery under **Or a BMS_BLE battery (Bluetooth)**: the card finds its entities by itself, takes over its name and cell count, and that's it. In YAML:
+*Since 1.12.0.* Batteries read over Bluetooth by the [**BMS_BLE-HA**](https://github.com/patman15/BMS_BLE-HA) integration (JBD, Daly, JK, Seplos, EG4, … BMSes) work too. In the editor, pick the battery under **Or a BMS_BLE battery (Bluetooth)**: the card finds its entities by itself, takes over its name and cell count, and that's it. In YAML:
 
 ```yaml
 type: custom:battery-pack-card
