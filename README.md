@@ -76,7 +76,7 @@ If you use the JK-BMS RS485 addon, `prefix` is the only required field.
 | `show_cells`        | bool    | `true`                      | Show the per-cell voltage + resistance grid.                  |
 | `show_cell_resistance` | bool | `true`                    | Show the internal resistance under each cell's voltage. Hidden anyway when your BMS has no resistance sensors (e.g. Seplos), unless `show_missing` is on. |
 | `show_summary`      | bool    | `true`                      | Show the min / avg / max / Δ summary line.                    |
-| `show_temperatures` | bool    | `true`                      | Show the temperature strip (MOSFET + up to 4 probes). Tiles whose sensor doesn't exist are hidden. |
+| `show_temperatures` | bool    | `true`                      | Show the temperature strip (MOSFET + up to 4 probes, ambient temperature next to the heading). Tiles whose sensor doesn't exist are hidden. |
 | `show_missing`      | bool    | `false`                     | Also show tiles, pills and lines for sensors that don't exist (as `0`, `OFF` or `—`), the way the card worked before 1.8. Off: they're hidden. |
 
 ## Advanced configuration
@@ -150,8 +150,9 @@ The DRY contacts come from jkbms-rs485-addon 4.1.12 and later. The add-on names 
 | `entity_temp_probe_2`        | `sensor.X_sonde_2_temp`                      | External probe 2 temp.       |
 | `entity_temp_probe_3`        | `sensor.X_sonde_3_temp`                      | External probe 3 temp.       |
 | `entity_temp_probe_4`        | `sensor.X_sonde_4_temp`                      | External probe 4 temp.       |
+| `entity_temp_ambient`        | `sensor.X_ambient_temp`                      | Ambient temp, e.g. the environment probe of a Pace BMS. Shown next to the *Temperatures* heading. |
 
-Only sensors that actually exist in Home Assistant get a tile; the remaining tiles share the row. So a BMS with just a MOSFET sensor and two probes shows three tiles, not five with 0° fillers. A sensor that exists but is `unavailable` shows `—`.
+Only sensors that actually exist in Home Assistant get a tile; the remaining tiles share the row. So a BMS with just a MOSFET sensor and two probes shows three tiles, not five with 0° fillers. A sensor that exists but is `unavailable` shows `—`. The ambient temperature is not the battery: it is shown next to the heading instead of as a tile, does not count as the pack's hottest temperature and does not trigger the temperature alert.
 
 > **JK BMS: skip battery temperature 3.** On a JK BMS the third battery temperature is the same sensor as the MOS temperature, which is why the JK app only shows T1, T2, T4 and T5 next to the MOS (CMOS) temperature. If your integration exposes five battery temperatures (e.g. *Temperature 01* to *05*), point probes 1–4 at temperatures **1, 2, 4 and 5**, not 1–4; otherwise the card shows the MOS temperature twice and misses T5.
 

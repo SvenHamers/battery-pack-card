@@ -310,6 +310,7 @@
       set("sensor.test_temp_p2",  "23.8");
       set("sensor.test_temp_p3",  "24.1");
       set("sensor.test_temp_p4",  "23.9");
+      set("sensor.test_temp_ambient", "19.5");
 
       window.__harnessStates = states;
       setTimeout(() => window.__rerenderTemplates && window.__rerenderTemplates(), 0);
@@ -376,6 +377,7 @@
         entity_temp_probe_2: "sensor.test_temp_p2",
         entity_temp_probe_3: "sensor.test_temp_p3",
         entity_temp_probe_4: "sensor.test_temp_p4",
+        entity_temp_ambient: "sensor.test_temp_ambient",
         ...(document.getElementById("alerts").value === "on" ? { alerts: { enabled: true, notify: ["persistent_notification", "notify.mobile_app_phone"] } } : {}),
       };
     }

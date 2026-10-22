@@ -165,6 +165,7 @@ const ADVANCED_SECTIONS = [
       { name: "entity_temp_probe_2", selector: ENT_SENSOR },
       { name: "entity_temp_probe_3", selector: ENT_SENSOR },
       { name: "entity_temp_probe_4", selector: ENT_SENSOR },
+      { name: "entity_temp_ambient", selector: ENT_SENSOR },
     ],
   },
   {
@@ -326,6 +327,7 @@ const LABELS = {
   entity_temp_probe_2: "Probe 2 temperature",
   entity_temp_probe_3: "Probe 3 temperature",
   entity_temp_probe_4: "Probe 4 temperature",
+  entity_temp_ambient: "Ambient temperature",
   cell_voltage_pattern: "Cell voltage pattern (uses {n} or {nn}; may be a template)",
   cell_resistance_pattern: "Cell resistance pattern (uses {n} or {nn}; may be a template)",
   cell_voltage_from: "Cell voltage source unit",
@@ -1487,7 +1489,8 @@ class BatteryPackCard extends HTMLElement {
     const dBand = deltaBands(cfg);
     const deltaState = !Number.isFinite(deltaMv) ? "" : deltaMv >= dBand.bad ? "bad" : deltaMv >= dBand.warn ? "warn" : "ok";
 
-    // Hottest sensor, in the unit the card shows, with its band colour.
+    // Hottest sensor, in the unit the card shows, with its band colour. The
+    // ambient temperature is not the battery, so it stays out of this.
     let temp = null;
     for (const eid of [E.tMos, E.t1, E.t2, E.t3, E.t4]) {
       if (!has(eid)) continue;
@@ -1723,6 +1726,7 @@ class BatteryPackCard extends HTMLElement {
       t2:       pick(c.entity_temp_probe_2, def("sonde_2_temp")),
       t3:       pick(c.entity_temp_probe_3, def("sonde_3_temp")),
       t4:       pick(c.entity_temp_probe_4, def("sonde_4_temp")),
+      tAmb:     pick(c.entity_temp_ambient, def("ambient_temp")),
     };
   }
 
@@ -1836,6 +1840,9 @@ class BatteryPackCard extends HTMLElement {
     ].filter(([, eid]) => shown(eid))
      .map(([label, eid]) => this._tempTile(label, eid))
      .join("");
+    // The ambient temperature is the room, not the battery: it goes next to the
+    // heading instead of into the row of battery tiles.
+    const ambient = shown(E.tAmb) ? this._tempInfo(E.tAmb) : null;
 
     // Direction comes from the current sensor (signed) — some BMS integrations
     // report power as unsigned magnitude, so current is the source of truth.
@@ -1892,9 +1899,9 @@ class BatteryPackCard extends HTMLElement {
           <span ${this._dataE(E.vDelta)}><b class="dv" style="color:${vDelta * 1000 < dBand.warn ? "var(--clr-green)" : vDelta * 1000 < dBand.bad ? "var(--clr-amber)" : "var(--clr-red)"}">${fmt(vDelta * 1000, 0)}</b> mV <span class="muted">Δ</span></span>
         </div>` : ""}
 
-      ${cfg.show_temperatures && tempTiles ? `
-        <div class="section-label">TEMPERATURES</div>
-        <div class="temps">${tempTiles}</div>` : ""}
+      ${cfg.show_temperatures && (tempTiles || ambient) ? `
+        <div class="section-label temps-label">TEMPERATURES${ambient ? `<span class="ambient" ${this._dataE(E.tAmb)} role="button">Ambient ${ambient.shown === null ? "—" : fmt(ambient.shown, 1) + "°"}</span>` : ""}</div>
+        ${tempTiles ? `<div class="temps">${tempTiles}</div>` : ""}` : ""}
 
       <div class="footer">
         ${this._infoButton()}
@@ -2119,6 +2126,8 @@ class BatteryPackCard extends HTMLElement {
       .pill-alert  { color: var(--clr-red);    background: rgba(239,83,80,0.15); }
 
       .section-label { font-size: 10px; letter-spacing: 1.5px; opacity: 0.55; margin-top: 4px; }
+      .temps-label { display: flex; justify-content: space-between; gap: 8px; }
+      .temps-label .ambient { letter-spacing: 0; cursor: pointer; }
 
       .cells {
         display: grid;
