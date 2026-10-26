@@ -1077,7 +1077,7 @@ class BatteryPackCard extends HTMLElement {
       const all = new Set();
       Object.values(this._resolveEntities()).forEach((v) => { if (typeof v === "string" && isTpl(v)) all.add(v); });
       for (let n = 1; n <= (this._cells() || 0); n++) {
-        for (const k of ["v", "r"]) { const t = this._cellEntity(k, n); if (isTpl(t)) all.add(t); }
+        for (const k of ["v", "r", "t"]) { const t = this._cellEntity(k, n); if (isTpl(t)) all.add(t); }
       }
       this._cfgTplAll = all;
     }
@@ -2224,11 +2224,17 @@ class BatteryPackCard extends HTMLElement {
           <div class="cell-n">#${n}</div>
           <div class="cell-v">${fmt(v, vDec)}</div>
           ${showR ? `<div class="cell-r">${fmt(r * 1000, rDec)} mΩ</div>` : ""}
-          ${et && this._exists(et) ? `<div class="cell-t">${fmt(this._num(et), 0)}°</div>` : ""}
+          ${et && this._exists(et) ? this._cellTemp(et) : ""}
         </div>
       `;
     }
     return out;
+  }
+
+  // In the card's temperature_unit, like the temperature tiles.
+  _cellTemp(entityId) {
+    const { shown } = this._tempInfo(entityId);
+    return `<div class="cell-t">${shown === null ? "—" : fmt(shown, 0) + "°"}</div>`;
   }
 
   _tempTile(label, entityId) {
@@ -2377,7 +2383,7 @@ class BatteryPackCard extends HTMLElement {
       .max-red .cell.min { border-color: var(--clr-green); box-shadow: 0 0 12px rgba(76,175,80,0.4); }
       .max-red .cell.max { border-color: var(--clr-red);   box-shadow: 0 0 12px rgba(239,83,80,0.4); }
       .cell-n { font-size: 9px; opacity: 0.55; line-height: 1; }
-      .cell-v { font-size: var(--cell-fs, 14px); font-weight: 700; line-height: 1.35; font-variant-numeric: tabular-nums; white-space: nowrap; }
+      .cell-v { font-size: var(--cell-fs, 14px); font-weight: 700; line-height: 1.4; font-variant-numeric: tabular-nums; white-space: nowrap; }
       .cell-r { font-size: 9px; opacity: 0.55; line-height: 1; }
       .cell-t { font-size: calc(var(--cell-fs, 14px) * 0.78); opacity: 0.7; line-height: 1.15; }
 
