@@ -86,7 +86,7 @@ If you use the JK-BMS RS485 addon, `prefix` is the only required field.
 | `bms_ble_device`    | string  | —                           | A [BMS_BLE-HA](#bms_ble-ha-batteries-bluetooth) battery (its device id) instead of a prefix. |
 | `name`              | string  | `<prefix>`                  | Title shown in the card header.                               |
 | `alarm_prefix`      | string  | `<prefix>_<prefix>`         | Prefix for `*_alarm_status` / `*_alarm_active`. Blank: `<prefix>_<prefix>` when that exists, otherwise the card looks for alarm entities belonging to the prefix (e.g. with the add-on's Multi-Pack naming). |
-| `cells`             | integer | `16`                        | Number of series cells to render (4–32).                      |
+| `cells`             | integer | `16`                        | Number of series cells to render (4–512).                     |
 | `show_battery`      | bool    | `true`                      | Show the SVG battery silhouette with SOC fill.                |
 | `show_stats`        | bool    | `true`                      | Show the stat tiles (voltage, current, power, balance, cycles, phase). Tiles whose sensor doesn't exist are hidden; without a power sensor, power is voltage × current. |
 | `show_pills`        | bool    | `true`                      | Show charge / discharge / balance / heater / DRY1 / DRY2 status pills. Pills whose sensor doesn't exist are hidden; each can also be switched off, see [Status pills](#status-pills). |
@@ -178,15 +178,18 @@ Only sensors that actually exist in Home Assistant get a tile; the remaining til
 For each cell `n` (1..`cells`) the card resolves the voltage and resistance entities in this order:
 
 1. **Explicit per-cell override** — `entity_cell_<n>_volt` / `entity_cell_<n>_ohm`
-2. **Pattern shortcut** — `cell_voltage_pattern` / `cell_resistance_pattern`, with `{n}` or `{nn}` substituted by the cell index
+2. **Pattern shortcut** — `cell_voltage_pattern` / `cell_resistance_pattern`, with `{n}`, `{nn}`, `{nnn}`, … substituted by the cell index, zero-padded to the number of n's
 3. **Prefix default** — `sensor.<prefix>_cell_<n>_volt` / `sensor.<prefix>_cell_<n>_ohm`
 
 | Key                              | Description                                                  |
 | -------------------------------- | ------------------------------------------------------------ |
 | `entity_cell_<n>_volt`           | Voltage entity for cell `<n>`. Takes precedence over pattern and prefix default. |
 | `entity_cell_<n>_ohm`            | Internal resistance entity for cell `<n>`.                   |
-| `cell_voltage_pattern`           | Pattern for every cell's voltage entity. `{n}` → `1..N`, `{nn}` → `01..NN`. |
+| `cell_voltage_pattern`           | Pattern for every cell's voltage entity. `{n}` → `1..N`, `{nn}` → `01..NN`, `{nnn}` → `001..NNN`. |
 | `cell_resistance_pattern`        | Pattern for every cell's resistance entity.                  |
+| `cell_temp_pattern`              | Optional temperature shown under each cell's voltage. BMSes report module temperatures, so a group of cells shares a sensor: cell `n` uses group `ceil(n / cell_temp_group_size)`, substituted for `{g}` / `{gg}` (zero-padded). Off when blank. |
+| `cell_temp_group_size`           | Cells per temperature sensor for `cell_temp_pattern` (default `5`). |
+| `entity_cell_<n>_temp`           | Temperature entity for cell `<n>`. Takes precedence over `cell_temp_pattern`. |
 
 The Advanced tab shows individual entity-pickers for cells 1..N (changes when you adjust `cells`). **If your BMS uses an entity-naming scheme the patterns can't express** (e.g. mixed prefixes, hex indices, vendor-specific names), the per-cell fields are the bulletproof path — they accept any entity ID.
 
@@ -201,6 +204,17 @@ cell_voltage_pattern: sensor.bms_a_view_cell_voltage_{nn}     # 01..16 zero-padd
 entity_cell_5_volt: sensor.special_probe_for_cell_5           # one-off override on top of the pattern
 ```
 
+Example — a 150-cell traction pack with three-digit cell names and one temperature sensor per 5 cells:
+
+```yaml
+cells: 150
+cell_voltage_pattern: sensor.ev_cell_{nnn}_voltage            # 001..150
+cell_temp_pattern: sensor.ev_module_{gg}_temperature          # cells 1–5 → 01, 6–10 → 02, …
+cell_temp_group_size: 5
+```
+
+Cell temperatures follow `temperature_unit`, like the temperature tiles, and are hidden when the sensor doesn't exist.
+
 ### Display
 
 The card stores voltages internally in V and resistances in Ω. **Voltage units are detected automatically:** a lithium cell sits between roughly 1.5 V and 5 V, so a reading like `3331` can only be millivolts and `3.331` can only be volts. If the configured unit disagrees with the readings, the card uses the readings, ignores `cell_voltage_decimals` until the setting is fixed (decimals tuned against mis-scaled numbers would turn `3.331` into `3`), and logs a note in the browser console. The unit settings still apply until the first reading arrives, and set to match they silence the console note. Resistance units are not detected — set `cell_resistance_from` if your BMS reports mΩ.
@@ -213,6 +227,7 @@ The card stores voltages internally in V and resistances in Ω. **Voltage units 
 | `cell_resistance_from`       | `ohm`   | Source unit for cell resistances: `ohm` or `mohm`.           |
 | `cell_resistance_decimals`   | `0`     | Decimals shown for the mΩ readout under each cell.           |
 | `cells_max_columns`          | `8`     | Maximum cell tiles per row. 8 and 16-cell packs render as 1 or 2 full rows on any card wide enough. |
+| `cell_font_size`             | `0`     | Cell voltage font size in px. `0` = automatic: 14 px, 13 px from 64 cells, 12 px from 96, so a dense grid's values fit their tiles. |
 | `cells_min_width`            | `48`    | Minimum cell-tile width in px. When the card is too narrow for `cells_max_columns` tiles of this width, the grid wraps to fewer columns. |
 | `temperature_unit`           | `auto`  | Temperature display: `auto` shows the value as Home Assistant reports it (HA converts temperature sensors to your unit system, e.g. °F), `C` or `F` converts. The tile colours always follow the real temperature, whatever the unit. |
 | `temp_cold`                  | `5` °C / `41` °F   | Temperature tiles turn **blue** below this.   |

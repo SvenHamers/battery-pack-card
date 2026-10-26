@@ -38,6 +38,9 @@ const DEFAULTS = {
   cell_resistance_decimals: 0,
   cells_min_width: 48,
   cells_max_columns: 8,
+  cell_font_size: 0,        // 0 = auto: 12px at >=96 cells, 13 at >=64, else 14
+  cell_temp_pattern: "",   // sensor per temperature group, {g}/{gg}
+  cell_temp_group_size: 5,  // how many cells share one temperature sensor
   // "auto" shows temperatures as Home Assistant reports them; "C" / "F"
   // converts. The colours always follow the real temperature either way.
   temperature_unit: "auto",
@@ -88,7 +91,7 @@ const BASIC_SCHEMA = [
   { name: "name", selector: { text: {} } },
   { name: "prefix", selector: { text: {} } },
   { name: "alarm_prefix", selector: { text: {} } },
-  { name: "cells", selector: { number: { min: 4, max: 32, step: 1, mode: "box" } } },
+  { name: "cells", selector: { number: { min: 4, max: 512, step: 1, mode: "box" } } },
   {
     type: "grid",
     name: "",
@@ -207,6 +210,9 @@ const ADVANCED_SECTIONS = [
           { name: "cell_resistance_decimals", selector: { number: { min: 0, max: 4, step: 1, mode: "box" } } },
           { name: "cells_min_width",   selector: { number: { min: 30, max: 200, step: 1, mode: "box" } } },
           { name: "cells_max_columns", selector: { number: { min: 1, max: 32, step: 1, mode: "box" } } },
+          { name: "cell_font_size", selector: { number: { min: 0, max: 24, step: 1, mode: "box" } } },
+          { name: "cell_temp_pattern", selector: { text: {} } },
+          { name: "cell_temp_group_size", selector: { number: { min: 1, max: 64, step: 1, mode: "box" } } },
           {
             name: "temperature_unit",
             selector: { select: { options: [
@@ -338,6 +344,9 @@ const LABELS = {
   cell_resistance_decimals: "Cell resistance decimals (mΩ)",
   cells_min_width: "Cell tile min width (px)",
   cells_max_columns: "Cell grid max columns",
+  cell_font_size: "Cell voltage font size (px, 0 = auto)",
+  cell_temp_pattern: "Cell temperature pattern (uses {g} or {gg})",
+  cell_temp_group_size: "Cells per temperature sensor",
   temperature_unit: "Temperature unit",
   capacity_unit: "Capacity shown in",
   nominal_voltage: "Nominal pack voltage for kWh (blank = cells × 3.2 V)",
@@ -535,11 +544,20 @@ const findPrefixes = (hass) => {
     .filter((p) => st[`sensor.${p}_tension_totale_volt`] || st[`sensor.${p}_cell_1_volt`])
     .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
 };
+// A 3-decimal cell voltage is ~36-41px wide; a dense pack's tiles are 48-60px,
+// so the number wraps or spills out. Scale it with the cell count
+// (cell_font_size overrides).
+const cellFontPx = (explicit, n) => {
+  const e = parseInt(explicit, 10);
+  if (e > 0) return e;
+  return n >= 96 ? 12 : n >= 64 ? 13 : 14;
+};
+
 // Number of cells a pack has, from its cell voltage sensors.
 const countCells = (hass, prefix) => {
   const st = (hass && hass.states) || {};
   let n = 0;
-  while (n < 32 && st[`sensor.${prefix}_cell_${n + 1}_volt`]) n++;
+  while (n < 512 && st[`sensor.${prefix}_cell_${n + 1}_volt`]) n++;
   return n;
 };
 // "pack_1_bms_1" → "Pack 1 BMS 1", "bms_master" → "BMS master"
@@ -595,7 +613,7 @@ const bleEntities = (hass, dev) => {
 const bleCellCount = (hass, dev) => {
   const e = bleEntities(hass, dev).cells;
   const list = e && hass.states[e].attributes.cell_voltages;
-  return Array.isArray(list) ? Math.min(32, list.length) : 0;
+  return Array.isArray(list) ? Math.min(512, list.length) : 0;
 };
 // "sensor.x@cell_voltages[3]": one item of a list attribute, which is how
 // BMS_BLE-HA hands over its cells and temperatures. "@" never occurs in an
@@ -728,7 +746,7 @@ class BatteryPackCard extends HTMLElement {
       const all = new Set();
       Object.values(this._resolveEntities()).forEach((v) => { if (typeof v === "string" && isTpl(v)) all.add(v); });
       for (let n = 1; n <= (this._cells() || 0); n++) {
-        for (const k of ["v", "r"]) { const t = this._cellEntity(k, n); if (isTpl(t)) all.add(t); }
+        for (const k of ["v", "r", "t"]) { const t = this._cellEntity(k, n); if (isTpl(t)) all.add(t); }
       }
       this._cfgTplAll = all;
     }
@@ -1514,6 +1532,17 @@ class BatteryPackCard extends HTMLElement {
 
   _cellEntity(kind, n) {
     const c = this._config;
+    if (kind === "t") {
+      // BMSes report module temperatures, not per-cell ones, so a group of
+      // cells shares a sensor: cell n -> group ceil(n / cell_temp_group_size).
+      const tExplicit = orNull(c[`entity_cell_${n}_temp`]);
+      if (tExplicit) return tExplicit;
+      const tPat = orNull(c.cell_temp_pattern);
+      if (!tPat) return null;
+      const size = Math.max(1, intOr(c.cell_temp_group_size, 1));
+      const g = Math.ceil(n / size);
+      return tPat.replace(/\{(g+)\}/g, (_m, digits) => String(g).padStart(digits.length, "0"));
+    }
     const suffix = kind === "v" ? "volt" : "ohm";
     // 1. explicit per-cell override wins
     const explicit = orNull(c[`entity_cell_${n}_${suffix}`]);
@@ -1523,8 +1552,9 @@ class BatteryPackCard extends HTMLElement {
     const pat = orNull(c[patternKey]);
     if (pat) {
       return pat
-        .replace(/\{nn\}/g, String(n).padStart(2, "0"))
-        .replace(/\{n\}/g, n);
+        // {n}, {nn}, {nnn}, ... pad to the number of n's, so a pack whose
+        // entities are zero-padded to three digits (cell_001_voltage) works.
+        .replace(/\{(n+)\}/g, (_m, digits) => String(n).padStart(digits.length, "0"));
     }
     // 3. a BMS_BLE battery's cell list
     if (this._ble()) {
@@ -1684,7 +1714,7 @@ class BatteryPackCard extends HTMLElement {
 
       ${cfg.show_cells ? `
         <div class="section-label">CELLS — voltage${showR ? " and resistance" : ""}, colour = mV from pack avg (${dev.soft}/${dev.warn}/${dev.bad})</div>
-        <div class="cells${maxRed ? " max-red" : ""}" style="--cell-min-w:${intOr(cfg.cells_min_width, 48)}px;--cell-max-cols:${Math.max(1, intOr(cfg.cells_max_columns, 8))}">${this._renderCells(this._cells(), vAvg, minCell, maxCell, vSc, vDec, rSc, rDec, dev, showR)}</div>` : ""}
+        <div class="cells${maxRed ? " max-red" : ""}" style="--cell-min-w:${intOr(cfg.cells_min_width, 48)}px;--cell-max-cols:${Math.max(1, intOr(cfg.cells_max_columns, 8))};--cell-fs:${cellFontPx(cfg.cell_font_size, this._cells())}px">${this._renderCells(this._cells(), vAvg, minCell, maxCell, vSc, vDec, rSc, rDec, dev, showR)}</div>` : ""}
 
       ${cfg.show_summary ? `
         <div class="cell-summary">
@@ -1778,6 +1808,7 @@ class BatteryPackCard extends HTMLElement {
     for (let n = 1; n <= N; n++) {
       const ev = this._cellEntity("v", n);
       const er = this._cellEntity("r", n);
+      const et = this._cellEntity("t", n);   // shared module temperature
       const v = this._num(ev) * vSc;       // → volts
       const r = this._num(er) * rSc;       // → ohms
       const devMv = Math.round(Math.abs(v - vAvg) * 1e6) / 1000; // mV, rounded to 1 µV
@@ -1791,10 +1822,17 @@ class BatteryPackCard extends HTMLElement {
           <div class="cell-n">#${n}</div>
           <div class="cell-v">${fmt(v, vDec)}</div>
           ${showR ? `<div class="cell-r">${fmt(r * 1000, rDec)} mΩ</div>` : ""}
+          ${et && this._exists(et) ? this._cellTemp(et) : ""}
         </div>
       `;
     }
     return out;
+  }
+
+  // In the card's temperature_unit, like the temperature tiles.
+  _cellTemp(entityId) {
+    const { shown } = this._tempInfo(entityId);
+    return `<div class="cell-t">${shown === null ? "—" : fmt(shown, 0) + "°"}</div>`;
   }
 
   _tempTile(label, entityId) {
@@ -1941,8 +1979,9 @@ class BatteryPackCard extends HTMLElement {
       .max-red .cell.min { border-color: var(--clr-green); box-shadow: 0 0 12px rgba(76,175,80,0.4); }
       .max-red .cell.max { border-color: var(--clr-red);   box-shadow: 0 0 12px rgba(239,83,80,0.4); }
       .cell-n { font-size: 9px; opacity: 0.55; line-height: 1; }
-      .cell-v { font-size: 14px; font-weight: 700; line-height: 1.4; font-variant-numeric: tabular-nums; }
+      .cell-v { font-size: var(--cell-fs, 14px); font-weight: 700; line-height: 1.4; font-variant-numeric: tabular-nums; white-space: nowrap; }
       .cell-r { font-size: 9px; opacity: 0.55; line-height: 1; }
+      .cell-t { font-size: calc(var(--cell-fs, 14px) * 0.78); opacity: 0.7; line-height: 1.15; }
 
       /* A fixed grid, not a wrapping line: whether Δ fitted on the first line
          used to depend on the values ("min #3" vs "min #10"), so the line
@@ -2360,7 +2399,7 @@ class BatteryPackCardEditor extends HTMLElement {
       this._basicForm.schema = this._basicSchema();
       this._basicForm.data = { ...DEFAULTS, ...this._config };
     } else {
-      const N = Math.max(1, Math.min(32, parseInt(this._config.cells, 10) || 16));
+      const N = Math.max(1, Math.min(512, parseInt(this._config.cells, 10) || 16));
       if (N !== this._lastCellsN) {
         this._rebuildCellSections(N);
         this._lastCellsN = N;
