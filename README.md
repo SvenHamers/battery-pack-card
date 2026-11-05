@@ -173,6 +173,8 @@ The DRY contacts come from jkbms-rs485-addon 4.1.12 and later. The add-on names 
 
 Only sensors that actually exist in Home Assistant get a tile; the remaining tiles share the row. So a BMS with just a MOSFET sensor and two probes shows three tiles, not five with 0° fillers. A sensor that exists but is `unavailable` shows `—`. The ambient temperature is not the battery: it is shown next to the heading instead of as a tile, does not count as the pack's hottest temperature and does not trigger the temperature alert.
 
+The MOSFET tile is always shown, but the BMS runs much hotter than the cells and is allowed to, so the MOSFET doesn't count as the pack's temperature either: the stacked card's pack screens, its bank display and the temperature alert look at the probes only. Want it included? Turn on `temp_include_mos`. A pack without probes uses its MOSFET sensor anyway.
+
 > **JK BMS: skip battery temperature 3.** On a JK BMS the third battery temperature is the same sensor as the MOS temperature, which is why the JK app only shows T1, T2, T4 and T5 next to the MOS (CMOS) temperature. If your integration exposes five battery temperatures (e.g. *Temperature 01* to *05*), point probes 1–4 at temperatures **1, 2, 4 and 5**, not 1–4; otherwise the card shows the MOS temperature twice and misses T5.
 
 ### Per-cell entities
@@ -235,6 +237,7 @@ The card stores voltages internally in V and resistances in Ω. **Voltage units 
 | `temp_cold`                  | `5` °C / `41` °F   | Temperature tiles turn **blue** below this.   |
 | `temp_warm`                  | `35` °C / `95` °F  | … **amber** from this (green in between).     |
 | `temp_hot`                   | `50` °C / `122` °F | … **red** from this. The three are set in the unit the card shows (`temperature_unit`, or on `auto` Home Assistant's own unit); leave them blank for the defaults. Sorted before use; negative values are fine. |
+| `temp_include_mos`           | `false` | Count the MOSFET sensor in the pack's hottest and coldest temperature, as shown on the stacked card and used by the temperature alert. Off: only the probes count. The MOSFET tile and its colours don't change. |
 | `capacity_unit`              | `Ah`    | Capacity in the battery as charge, `Ah`, or as energy, `kWh` (e.g. `624.0 / 628 Ah` becomes `31.9 / 32.2 kWh` at 51.2 V). A capacity sensor that already reports Wh or kWh is used as is. |
 | `nominal_voltage`            | *(cells × 3.2 V)* | Pack voltage used for kWh = Ah × V. Blank: LiFePO4's 3.2 V per cell, so 51.2 V for 16 cells. Set it for other chemistries, e.g. `58.8` for 16 NMC cells at 3.7 V. |
 | `invert_current`             | `false`           | The card takes positive current as charging. If your BMS reports charging as **negative** (the card then says *discharging* while the battery charges), turn this on: it flips the sign of current and power. |
@@ -324,7 +327,7 @@ While editing:
 | --- | --- | --- |
 | Cell difference | Δ between the highest and lowest cell, for 5 minutes | warning from the card's Δ warning band (default 5 mV), alarm from its red band (15 mV) |
 | Cell voltage | any cell above or below what the chemistry allows (LFP 3.60 / 2.90 V, NMC 4.15 / 3.10 V, LTO 2.75 / 1.90 V) | alarm |
-| Temperature | the hottest or coldest sensor | warning from the card's amber, alarm from its red; warning below its blue |
+| Temperature | the hottest or coldest battery sensor (the MOSFET only with `temp_include_mos`) | warning from the card's amber, alarm from its red; warning below its blue |
 | Low SOC | SOC at or below 20 % / 10 % (off by default: a low SOC is often normal at night) | warning / alarm |
 | BMS alarm | the pack's alarm entity | alarm |
 | Charge / discharge switched off | the BMS turned charging or discharging off | warning |
@@ -418,6 +421,7 @@ Each pack's screen shows its SOC (with a bar), voltage, current, cell Δ and its
 | `entity_capacity_total`     | entity or template | — | Bank total capacity (Bat-Capacity). Blank: the packs' sum. |
 | `nominal_voltage`           | number  | —              | Voltage used to turn a bank capacity in Ah into kWh (with `capacity_unit: kWh`). Blank: the packs' mean nominal voltage, or without packs the bank voltage. |
 | `invert_current`            | bool    | `false`        | Flip the sign of current and power for all packs and for the bank's `entity_current` / `entity_power`, for a BMS that reports charging as negative. A pack (or `pack_defaults`) can still set its own. |
+| `temp_include_mos`          | bool    | `false`        | Count the MOSFET sensor in each pack's temperature, the bank display's warmest temperature and the temperature alert. A pack (or `pack_defaults`) can still set its own. |
 
 The bank totals show on a **bank display** built into the top of the cabinet, styled after the JK BMS screen: voltage and current on top, the SOC in a ring next to the bank's total and remaining capacity, and below that the highest and lowest cell, the warmest temperature, the power in kW, the alarm state, the number of packs and the charge / discharge switches.
 

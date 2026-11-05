@@ -49,6 +49,9 @@ const DEFAULTS = {
   temp_cold: "",
   temp_warm: "",
   temp_hot: "",
+  // The MOSFET may run far hotter than the cells, so it has a tile but doesn't
+  // count as the pack's temperature (stacked card, alerts) unless this is on.
+  temp_include_mos: false,
   // Cell tint bands, in mV of deviation from the pack average. Packs differ in
   // how much spread is normal, so these are configurable rather than fixed.
   cell_dev_soft: 2,
@@ -280,6 +283,7 @@ const ADVANCED_SECTIONS = [
           { name: "temp_hot",  selector: TEMP_BAND },
         ],
       },
+      { name: "temp_include_mos", selector: { boolean: {} } },
     ],
   },
   {
@@ -360,6 +364,7 @@ const LABELS = {
   temp_cold: "Blue below (default 5 °C / 41 °F)",
   temp_warm: "Amber from (default 35 °C / 95 °F)",
   temp_hot: "Red from (default 50 °C / 122 °F)",
+  temp_include_mos: "Count the MOSFET in the pack's temperature and the temperature alert",
   cell_dev_soft: "Yellow above (mV)",
   cell_dev_warn: "Orange above (mV)",
   cell_dev_bad: "Red above (mV)",
@@ -1576,7 +1581,7 @@ class BatteryPackCard extends HTMLElement {
     // Hottest sensor, in the unit the card shows, with its band colour. The
     // ambient temperature is not the battery, so it stays out of this.
     let temp = null;
-    for (const eid of [E.tMos, E.t1, E.t2, E.t3, E.t4]) {
+    for (const eid of this._packTemps(E)) {
       if (!has(eid)) continue;
       const t = this._tempInfo(eid);
       if (t.shown !== null && (!temp || t.shown > temp.shown)) temp = t;
@@ -1601,6 +1606,14 @@ class BatteryPackCard extends HTMLElement {
       discharge: has(E.dch) ? this._on(E.dch) : null,
       entities: E,
     };
+  }
+
+  // The sensors that say how warm the battery is. The MOSFET only counts when
+  // temp_include_mos is on, or when the pack has nothing else to go on.
+  _packTemps(E) {
+    const v = this._config.temp_include_mos;
+    const probes = [E.t1, E.t2, E.t3, E.t4].filter((eid) => this._exists(eid));
+    return v === true || v === "true" || !probes.length ? [E.tMos, ...probes] : probes;
   }
 
   // What the alert automations read for this pack: each entity setting as a
@@ -1644,7 +1657,7 @@ class BatteryPackCard extends HTMLElement {
       cells: cellIds.map(expr).filter(Boolean),
       vmin: expr(E.vMin), vmax: expr(E.vMax), delta: expr(E.vDelta),
       sSc, vSc,
-      temps: [E.tMos, E.t1, E.t2, E.t3, E.t4].map(expr).filter(Boolean),
+      temps: this._packTemps(E).map(expr).filter(Boolean),
       soc: expr(E.soc),
       alarmB: ent(E.alarmB), alarmS: ent(E.alarmS), chg: ent(E.chg), dch: ent(E.dch),
       bands: { dw: d.warn, da: d.bad, tw, th, tc },
@@ -2850,7 +2863,7 @@ const ALERT_LABELS = {
 const ALERT_HINTS = {
   delta: "The difference between the highest and the lowest cell.",
   cell_voltage: "Any cell above or below what the chemistry allows.",
-  temperature: "The hottest and the coldest sensor, in Home Assistant's temperature unit.",
+  temperature: "The hottest and the coldest battery sensor, in Home Assistant's temperature unit.",
   soc: "Off by default: a low SOC is often normal at night.",
   bms_alarm: "When the BMS reports an alarm.",
   switches: "When the BMS turns charging or discharging off.",

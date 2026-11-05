@@ -44,6 +44,7 @@ const DEFAULTS = {
   // or without packs the bank voltage.
   nominal_voltage: "",
   invert_current: false,     // BMS reports charging as negative: flip current and power (packs and bank)
+  temp_include_mos: false,   // count the MOSFET in each pack's temperature and the temperature alert
   pack_defaults: {},
   packs: [],
 };
@@ -133,7 +134,7 @@ const socColor = (s) => (s > 50 ? "var(--clr-green)" : s > 20 ? "var(--clr-orang
 
 // Every pack's effective battery-pack-card config.
 const packConfigs = (cfg) => (Array.isArray(cfg.packs) ? cfg.packs : []).map((p, i) => {
-  const c = { capacity_unit: cfg.capacity_unit, invert_current: cfg.invert_current, ...(cfg.pack_defaults || {}), ...(p || {}) };
+  const c = { capacity_unit: cfg.capacity_unit, invert_current: cfg.invert_current, temp_include_mos: cfg.temp_include_mos, ...(cfg.pack_defaults || {}), ...(p || {}) };
   if (!c.name) c.name = `Pack ${i + 1}`;
   delete c.alerts;   // the stacked card owns the alerts
   return c;
@@ -913,6 +914,7 @@ const BANK_SCHEMA = [
       { name: "bank_display_size", selector: { select: { mode: "dropdown", options: [{ value: "full", label: "Full" }, { value: "compact", label: "Compact (one line)" }] } } },
       { name: "nominal_voltage", selector: { number: { min: 1, max: 1000, step: 0.1, mode: "box", unit_of_measurement: "V" } } },
       { name: "invert_current", selector: { boolean: {} } },
+      { name: "temp_include_mos", selector: { boolean: {} } },
     ],
   },
 ];
@@ -929,6 +931,7 @@ const LABELS = {
   bank_display_size: "Bank display",
   nominal_voltage: "Nominal voltage for kWh (blank = from the packs)",
   invert_current: "Invert current and power, for all packs and the bank",
+  temp_include_mos: "Count the MOSFET in each pack's temperature and the temperature alert",
   entity_capacity_total: "Bank total capacity",
   entity_cell_max: "Highest cell voltage",
   entity_cell_min: "Lowest cell voltage",
