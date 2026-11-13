@@ -32,6 +32,7 @@ const DEFAULTS = {
   show_bank_display: true,   // the JK-style display on top of the cabinet
   bank_display_size: "full", // "full", or "compact": one slim line
   capacity_unit: "Ah",       // "Ah" or "kWh", for the display and, unless set there, the packs
+  power_unit: "kW",          // the display's power: "kW" (2 decimals), "W" (whole watts), or "auto": W below 1 kW
   // Bank totals for that display, each an entity or a template. Whatever is
   // left blank is worked out from the packs where that makes sense.
   entity_soc: "",
@@ -498,6 +499,12 @@ class BatteryStackedPackCard extends HTMLElement {
     const attrs = (t) => `${t && t.entity ? ` data-entity="${esc(t.entity)}" role="button"` : ""}${t && t.error ? ` title="${esc(t.error)}"` : ""}`;
     const show = (t, d, unit, scale = 1) => (t.text !== null ? esc(t.text) : `${fmt(Number.isFinite(t.n) ? t.n / scale : NaN, d)}${unit}`);
     const item = (label, html, t, cls = "") => (html === null ? "" : `<span${attrs(t)}>${label}<span class="v ${cls}">${html}</span></span>`);
+    // Power in kW with 2 decimals, in whole watts, or ("auto") in watts while
+    // it rounds to under 1 kW, so a small system reads 85 W instead of 0.08 kW.
+    const pu = c.power_unit;
+    const pwrW = !!PWR && (pu === "W" || (pu === "auto" && PWR.text === null && Number.isFinite(PWR.n) && Math.round(Math.abs(PWR.n)) < 1000));
+    const pwrUnit = pwrW ? "W" : "kW";
+    const pwrShow = (unit) => show(PWR, pwrW ? 0 : 2, unit, pwrW ? 1 : 1000);
 
     const socN = SOC && SOC.text === null && Number.isFinite(SOC.n) ? Math.max(0, Math.min(100, SOC.n)) : null;
     const top = [
@@ -513,7 +520,7 @@ class BatteryStackedPackCard extends HTMLElement {
     const col = (a, b) => (a || b ? `<div class="col">${a}${b}</div>` : "");
     const bot = [
       col(item("Max.Cell:", cellMax === null ? null : `${fmt(cellMax, 3)}V`, X.entity_cell_max), item("Min.Cell:", cellMin === null ? null : `${fmt(cellMin, 3)}V`, X.entity_cell_min)),
-      col(item("Temp:", temp === null ? null : `${fmt(temp, 0)}°`, X.entity_temperature), PWR ? item("Pwr(kW):", show(PWR, 2, "", 1000), PWR) : ""),
+      col(item("Temp:", temp === null ? null : `${fmt(temp, 0)}°`, X.entity_temperature), PWR ? item(`Pwr(${pwrUnit}):`, pwrShow(""), PWR) : ""),
       col(watched.length ? item("Alarm:", alarms ? "Alarm" : "Normal", X.entity_alarm, alarms ? "red" : "") : "", packCount ? item("Packs:", fmt(packCount, 0), X.entity_pack_count) : ""),
       col(chg ? item("CHG:", chg[0], X.entity_charge, chg[1]) : "", dch ? item("DCH:", dch[0], X.entity_discharge, dch[1]) : ""),
     ].filter(Boolean);
@@ -526,7 +533,7 @@ class BatteryStackedPackCard extends HTMLElement {
       const cells = [
         V ? cell("Vtg", show(V, 2, "V"), V) : "",
         A ? cell("Cur", show(A, 1, "A"), A) : "",
-        PWR ? cell("Pwr", show(PWR, 2, "kW", 1000), PWR) : "",
+        PWR ? cell("Pwr", pwrShow(pwrUnit), PWR) : "",
         REM ? cell("Rem", REM.text !== null ? esc(REM.text) : `${fmt(REM.n, capDec(REM.n || 0))}${capUnit}`, REM) : "",
       ].join("");
       return `<div class="jk compact">
@@ -872,6 +879,7 @@ const BANK_SCHEMA = [
       { name: "show_bank_display", selector: { boolean: {} } },
       { name: "capacity_unit", selector: { select: { mode: "dropdown", options: [{ value: "Ah", label: "Ah (charge)" }, { value: "kWh", label: "kWh (energy)" }] } } },
       { name: "bank_display_size", selector: { select: { mode: "dropdown", options: [{ value: "full", label: "Full" }, { value: "compact", label: "Compact (one line)" }] } } },
+      { name: "power_unit", selector: { select: { mode: "dropdown", options: [{ value: "kW", label: "kW" }, { value: "W", label: "W" }, { value: "auto", label: "Auto (W below 1 kW)" }] } } },
       { name: "nominal_voltage", selector: { number: { min: 1, max: 1000, step: 0.1, mode: "box", unit_of_measurement: "V" } } },
       { name: "invert_current", selector: { boolean: {} } },
       { name: "temp_include_mos", selector: { boolean: {} } },
@@ -889,6 +897,7 @@ const LABELS = {
   show_bank_display: "Show the bank display",
   capacity_unit: "Capacity shown in",
   bank_display_size: "Bank display",
+  power_unit: "Bank power shown in",
   nominal_voltage: "Nominal voltage for kWh (blank = from the packs)",
   invert_current: "Invert current and power, for all packs and the bank",
   temp_include_mos: "Count the MOSFET in each pack's temperature",
