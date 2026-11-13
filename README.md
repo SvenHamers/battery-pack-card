@@ -413,6 +413,7 @@ Each pack's screen shows its SOC (with a bar), voltage, current, cell Δ and its
 | `show_bank_display`         | bool    | `true`         | The bank display on top of the cabinet. |
 | `bank_display_size`         | string  | `full`         | `full`: the JK-style screen. `compact`: a slim strip, always the same shape: the SOC ring on the left, voltage, current, power and remaining capacity 2 × 2 on the right, scaling with the card's width; an alarm gets its own line underneath. |
 | `capacity_unit`             | string  | `Ah`           | `Ah` or `kWh`, for the display's Bat- and Rem-Capacity, and for the packs' own cards unless a pack (or `pack_defaults`) sets its own. kWh uses each pack's nominal voltage (see the pack card's `nominal_voltage`). |
+| `power_unit`                | string  | `kW`           | The display's power (Pwr): `kW` with 2 decimals, `W` in whole watts, or `auto`: watts while under 1 kW, kW from there on. Handy for small systems, where 85 W would otherwise read 0.08 kW. |
 | `entity_soc`                | entity or template | — | Bank SOC, in the ring. Blank: worked out from the packs. |
 | `entity_voltage`            | entity or template | — | Bank voltage (Vtg). Blank: the packs' mean. |
 | `entity_current`            | entity or template | — | Bank current (Cur). Blank: the packs' sum. |
