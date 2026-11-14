@@ -2125,7 +2125,9 @@ class BatteryPackCard extends HTMLElement {
     const powRaw= this._exists(E.powW) ? this._watts(E.powW) * this._sign() : this._num(E.packV) * curA;
     const powW  = Number.isFinite(powRaw) ? powRaw : 0;
     const balA  = this._num(E.balA);
-    const cycles= this._state(E.cycles) || "0";
+    // A whole number: ESPHome reports 12.0 where the add-on reports 12.
+    const cyclesRaw = this._state(E.cycles), cyclesN = parseFloat(cyclesRaw);
+    const cycles= Number.isFinite(cyclesN) ? String(Math.round(cyclesN)) : (cyclesRaw || "0");
     const runtime= this._ble() || this._tpl() ? this._bleRuntime(E.runtime) : this._state(E.runtime) || "";
     // Voltage units are read off the data (see MV_CUTOFF); the configured
     // units only apply until a reading is available.
