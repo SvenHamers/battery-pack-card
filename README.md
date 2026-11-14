@@ -41,7 +41,7 @@ bms_ble_device: 0123456789abcdef0123456789abcdef   # the battery's device id; ea
 
 Only cards with `bms_ble_device` set do any of this; every other card works exactly as before. Thanks to @mohrerao for the idea and the first version (#19).
 
-# Works with ESPHome JK-BMS RS485 too
+## ESPHome JK-BMS RS485
 
 For [ajvdw/esphome-jk-bms](https://github.com/ajvdw/esphome-jk-bms) (the `jk_rs485_bms` ESPHome component), pick the **ESPHome JK-BMS RS485** template. The prefix is the ESPHome sub-device name, lowercased with `-` turned into `_` (device `BMS-rechts` → `bms_rechts`):
 
