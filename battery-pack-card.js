@@ -7,6 +7,9 @@
  *   alarm_prefix: bms_master_bms_master
  *   cells: 16
  *
+ * ESPHome jk_rs485_bms (ajvdw/esphome-jk-bms): add `template: esphome_jk_rs485`
+ * and set `prefix` to the ESPHome device name (BMS-rechts → bms_rechts).
+ *
  * Advanced config: override any individual entity ID via `entity_*` keys
  * (any field left blank falls back to the prefix-derived default).
  * For cells use a pattern with {n}, e.g.
@@ -20,6 +23,9 @@ const VERSION = "2.0.0-alpha.1";
 const DEFAULTS = {
   name: "",
   prefix: "",
+  // Which entity naming the prefix refers to. "" = the JK-BMS RS485 add-on;
+  // see TEMPLATES for the others (e.g. "esphome_jk_rs485").
+  template: "",
   alarm_prefix: "",
   cells: 16,
   show_battery: true,
@@ -90,9 +96,61 @@ const DEFAULTS = {
 // LiFePO4 nominal cell voltage, for kWh when no nominal_voltage is set.
 const NOMINAL_CELL_V = 3.2;
 
+// ─── Templates ──────────────────────────────────────────────────────────────
+// A template says how one family of BMS integrations names its entities, so
+// `prefix` plus `template` is all a card needs. Every entity_* setting, the
+// cell patterns and the per-cell overrides still win over a template.
+//   entities: card field -> [domain, suffix]; the id is <domain>.<prefix>_<suffix>.
+//             A field the integration doesn't have is left out (and stays hidden).
+//   cell:     {nn} / {n} are the cell number, zero-padded to the number of n's.
+//   cellCount: sensor suffix holding the real number of cells, if there is one.
+//   runtimeUnit: unit of the runtime sensor when HA reports none.
+const TEMPLATES = {
+  // ESPHome jk_rs485_bms (ajvdw/esphome-jk-bms), one ESPHome sub-device per
+  // BMS. A device called "BMS-rechts" gives sensor.bms_rechts_cell_voltage_01
+  // and so on: prefix: bms_rechts.
+  esphome_jk_rs485: {
+    label: "ESPHome JK-BMS RS485 (ajvdw/esphome-jk-bms)",
+    entities: {
+      soc:      ["sensor", "battery_capacity_state_of_charge"],
+      soh:      ["sensor", "battery_soh_valuation"],
+      packV:    ["sensor", "battery_voltage"],
+      curA:     ["sensor", "battery_current"],
+      powW:     ["sensor", "battery_power"],
+      balA:     ["sensor", "balancing_current"],
+      cycles:   ["sensor", "charging_cycles"],
+      capRem:   ["sensor", "battery_capacity_remaining"],
+      capTot:   ["sensor", "battery_capacity_setting"],
+      runtime:  ["sensor", "battery_total_runtime"],
+      vAvg:     ["sensor", "cell_average_voltage"],
+      vMin:     ["sensor", "cell_voltage_min"],
+      vMax:     ["sensor", "cell_voltage_max"],
+      vDelta:   ["sensor", "cell_delta_voltage"],
+      minCell:  ["sensor", "cell_voltage_min_cell_number"],
+      maxCell:  ["sensor", "cell_voltage_max_cell_number"],
+      alarmS:   ["sensor", "bms_errors"],                  // text sensor
+      alarmN:   ["sensor", "battery_total_alarms_active"], // a count, not on/off
+      chg:      ["binary_sensor", "status_charging"],
+      dch:      ["binary_sensor", "status_discharging"],
+      balAct:   ["binary_sensor", "status_balancing"],
+      tMos:     ["sensor", "temperature_powertube"],
+      t1:       ["sensor", "temperature_sensor_1"],
+      t2:       ["sensor", "temperature_sensor_2"],
+      t3:       ["sensor", "temperature_sensor_3"],
+      t4:       ["sensor", "temperature_sensor_4"],
+    },
+    cell: { v: "cell_voltage_{nn}", r: "cell_resistance_{nn}" },
+    cellCount: "cell_count_real",
+    runtimeUnit: "s",
+  },
+};
 const BASIC_SCHEMA = [
   { name: "name", selector: { text: {} } },
   { name: "prefix", selector: { text: {} } },
+  { name: "template", selector: { select: { mode: "dropdown", options: [
+    { value: "jkbms_addon", label: "JK-BMS RS485 add-on (default)" },
+    ...Object.entries(TEMPLATES).map(([value, t]) => ({ value, label: t.label })),
+  ] } } },
   { name: "alarm_prefix", selector: { text: {} } },
   { name: "cells", selector: { number: { min: 4, max: 512, step: 1, mode: "box" } } },
   {
@@ -298,7 +356,8 @@ const LABELS = {
   name: "Card title",
   prefix: "Entity prefix (optional, supplies defaults)",
   bms_ble_device: "Or a BMS_BLE battery (Bluetooth), instead of a prefix",
-  alarm_prefix: "Alarm prefix (default: <prefix>_<prefix>)",
+  template: "Entity naming of the prefix (which BMS integration)",
+  alarm_prefix: "Alarm prefix (default: <prefix>_<prefix>), add-on only",
   cells: "Cell count",
   show_battery: "Battery icon",
   show_stats: "Stats grid",
@@ -549,6 +608,33 @@ const findPrefixes = (hass) => {
     .filter((p) => st[`sensor.${p}_tension_totale_volt`] || st[`sensor.${p}_cell_1_volt`])
     .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
 };
+// Packs of a template's integration in this Home Assistant, found by their
+// SOC sensor and a first cell: [prefix, ...] in natural order.
+const findTemplatePrefixes = (hass, key) => {
+  const T = TEMPLATES[key];
+  if (!T) return [];
+  const st = (hass && hass.states) || {};
+  const soc = T.entities.soc[1], first = T.cell.v.replace(/\{(n+)\}/g, (_m, d) => "1".padStart(d.length, "0"));
+  const re = new RegExp(`^sensor\\.(.+)_${soc}$`);
+  return Object.keys(st)
+    .map((id) => re.exec(id)).filter(Boolean).map((m) => m[1])
+    .filter((p) => st[`sensor.${p}_${first}`])
+    .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+};
+// Number of cells of a template pack: what the BMS says it has, else as many
+// cell voltage sensors as exist (the ESPHome example declares 16 for any pack).
+const templateCellCount = (hass, key, prefix) => {
+  const T = TEMPLATES[key], st = (hass && hass.states) || {};
+  if (!T || !prefix) return 0;
+  if (T.cellCount) {
+    const n = parseInt(st[`sensor.${prefix}_${T.cellCount}`]?.state, 10);
+    if (n > 0) return Math.min(512, n);
+  }
+  let n = 0;
+  while (n < 512 && st[`sensor.${prefix}_${T.cell.v.replace(/\{(n+)\}/g, (_m, d) => String(n + 1).padStart(d.length, "0"))}`]) n++;
+  return n;
+};
+
 // A 3-decimal cell voltage is ~36-41px wide; a dense pack's tiles are 48-60px,
 // so the number wraps or spills out. Scale it with the cell count
 // (cell_font_size overrides).
@@ -960,6 +1046,10 @@ class BatteryPackCard extends HTMLElement {
     // (any naming); the alarm entities are then found by the card itself.
     const p = findPrefixes(hass)[0];
     if (p) return { prefix: p, name: prefixName(p), cells: countCells(hass, p) || 16 };
+    for (const key of Object.keys(TEMPLATES)) {
+      const tp = findTemplatePrefixes(hass, key)[0];
+      if (tp) return { prefix: tp, template: key, name: prefixName(tp), cells: templateCellCount(hass, key, tp) || 16 };
+    }
     const b = bleDevices(hass)[0];
     if (b) return { name: b.name, bms_ble_device: b.id, cells: bleCellCount(hass, b.id) || 16 };
     return {
@@ -975,6 +1065,8 @@ class BatteryPackCard extends HTMLElement {
   static findPacks(hass) {
     return [
       ...findPrefixes(hass).map((p) => ({ prefix: p, name: prefixName(p), cells: countCells(hass, p) || 16 })),
+      ...Object.keys(TEMPLATES).flatMap((key) => findTemplatePrefixes(hass, key)
+        .map((p) => ({ prefix: p, template: key, name: prefixName(p), cells: templateCellCount(hass, key, p) || 16 }))),
       ...bleDevices(hass).map((b) => ({ name: b.name, bms_ble_device: b.id, cells: bleCellCount(hass, b.id) || 16 })),
     ];
   }
@@ -1600,7 +1692,7 @@ class BatteryPackCard extends HTMLElement {
       energyTotal: has(E.capTot) ? this._capacity(E.capTot).kwh : null,
       nominalVoltage: this._nominalV(),
       deltaMv, deltaState, temp,
-      alarm: has(E.alarmB) ? this._on(E.alarmB) : null,
+      alarm: has(E.alarmB) ? this._on(E.alarmB) : (this._tpl() && (has(E.alarmN) || has(E.alarmS)) ? this._tplAlarm(E) : null),
       alarmText: has(E.alarmS) ? this._state(E.alarmS) : null,
       charge: has(E.chg) ? this._on(E.chg) : null,
       discharge: has(E.dch) ? this._on(E.dch) : null,
@@ -1739,6 +1831,13 @@ class BatteryPackCard extends HTMLElement {
   // -1 when the BMS reports charging as negative current (invert_current).
   _sign() { const v = this._config.invert_current; return v === true || v === "true" ? -1 : 1; }
   _on(eid)    { return /^(on|true)$/i.test(String(this._state(eid))); }
+  // Templated packs: an alarm is active when the count says so or the error
+  // text says something other than "no error".
+  _tplAlarm(E) {
+    if (this._num(E.alarmN) > 0) return true;
+    const s = String(this._state(E.alarmS) ?? "").trim().toLowerCase();
+    return !["", "normal", "ok", "none", "no alarm", "no error", "no errors", "off", "0"].includes(s);
+  }
   _raw(eid)   { return parseFloat(this._state(eid)); }
 
   // Effective V scale for a group of readings. The data wins over the
@@ -1805,6 +1904,9 @@ class BatteryPackCard extends HTMLElement {
     return `binary_sensor.${p}_dry${n}_contact`;
   }
 
+  // The template this card uses (see TEMPLATES), if any.
+  _tpl() { return TEMPLATES[orNull(this._config && this._config.template)] || null; }
+
   // The BMS_BLE battery this card shows, if any (see bleEntities).
   _ble() { return orNull(this._config && this._config.bms_ble_device); }
 
@@ -1812,6 +1914,7 @@ class BatteryPackCard extends HTMLElement {
   // as many as it reports.
   _cells() {
     if (this._ble() && !this._cellsSet) return bleCellCount(this._hass, this._ble()) || this._config.cells;
+    if (this._tpl() && !this._cellsSet) return templateCellCount(this._hass, this._config.template, this._config.prefix) || this._config.cells;
     return this._config.cells;
   }
 
@@ -1871,16 +1974,61 @@ class BatteryPackCard extends HTMLElement {
     const v = this._state(eid);
     const n = parseFloat(v);
     if (!Number.isFinite(n) || isTpl(eid)) return v || "";
-    const u = String(this._hass?.states[eid]?.attributes?.unit_of_measurement || "h");
+    const u = String(this._hass?.states[eid]?.attributes?.unit_of_measurement || (this._tpl() && this._tpl().runtimeUnit) || "h");
     const min = Math.round(n * ({ s: 1 / 60, min: 1, h: 60, d: 1440 }[u] || 60));
     if (min < 0) return "—";
     const d = Math.floor(min / 1440), h = Math.floor((min % 1440) / 60), m = min % 60;
     return [d ? `${d}d` : "", h ? `${h}h` : "", !d && (m || !h) ? `${m}m` : ""].filter(Boolean).join(" ");
   }
 
+  // A templated pack's entities (see TEMPLATES), with the same keys as below.
+  // Every entity_* setting still overrides; what the template has no entity
+  // for stays null, so that tile, pill or line is simply not shown.
+  _tplResolve(T) {
+    const c = this._config, p = c.prefix;
+    const d = (k) => { const m = T.entities[k]; return p && m ? `${m[0]}.${p}_${m[1]}` : null; };
+    return {
+      soc:      pick(c.entity_soc,                d("soc")),
+      soh:      pick(c.entity_soh,                d("soh")),
+      packV:    pick(c.entity_pack_voltage,       d("packV")),
+      curA:     pick(c.entity_current,            d("curA")),
+      powW:     pick(c.entity_power,              d("powW")),
+      balA:     pick(c.entity_balance_current,    d("balA")),
+      cycles:   pick(c.entity_cycles,             d("cycles")),
+      capRem:   pick(c.entity_capacity_remaining, d("capRem")),
+      capTot:   pick(c.entity_capacity_total,     d("capTot")),
+      runtime:  pick(c.entity_runtime,            d("runtime")),
+      phase:    pick(c.entity_charge_phase,       d("phase")),
+      vAvg:     pick(c.entity_cell_voltage_avg,   d("vAvg")),
+      vMin:     pick(c.entity_cell_voltage_min,   d("vMin")),
+      vMax:     pick(c.entity_cell_voltage_max,   d("vMax")),
+      vDelta:   pick(c.entity_cell_voltage_delta, d("vDelta")),
+      minCell:  pick(c.entity_cell_min_number,    d("minCell")),
+      maxCell:  pick(c.entity_cell_max_number,    d("maxCell")),
+      alarmS:   pick(c.entity_alarm_status,       d("alarmS")),
+      alarmB:   pick(c.entity_alarm_active,       d("alarmB")),
+      alarmN:   d("alarmN"),
+      chg:      pick(c.entity_switch_charge,      d("chg")),
+      dch:      pick(c.entity_switch_discharge,   d("dch")),
+      balAct:   pick(c.entity_balance_active,     d("balAct")),
+      balAllow: pick(c.entity_switch_balance,     d("balAllow")),
+      heat:     pick(c.entity_heating,            d("heat")),
+      dry1:     pick(c.entity_dry1,               d("dry1")),
+      dry2:     pick(c.entity_dry2,               d("dry2")),
+      tMos:     pick(c.entity_temp_mos,           d("tMos")),
+      t1:       pick(c.entity_temp_probe_1,       d("t1")),
+      t2:       pick(c.entity_temp_probe_2,       d("t2")),
+      t3:       pick(c.entity_temp_probe_3,       d("t3")),
+      t4:       pick(c.entity_temp_probe_4,       d("t4")),
+      tAmb:     pick(c.entity_temp_ambient,       d("tAmb")),
+    };
+  }
+
   _resolveEntities() {
     const c = this._config;
     if (this._ble()) return this._bleResolve();
+    const T = this._tpl();
+    if (T) return this._tplResolve(T);
     const p = c.prefix;
     const ap = this._alarmBase();
     const def = (suf, dom = "sensor") => (p ? `${dom}.${p}_${suf}` : null);
@@ -1948,7 +2096,13 @@ class BatteryPackCard extends HTMLElement {
         // entities are zero-padded to three digits (cell_001_voltage) works.
         .replace(/\{(n+)\}/g, (_m, digits) => String(n).padStart(digits.length, "0"));
     }
-    // 3. a BMS_BLE battery's cell list
+    // 3. the template's cell naming
+    const T = this._tpl();
+    if (T && c.prefix && T.cell[kind === "v" ? "v" : "r"]) {
+      const f = T.cell[kind === "v" ? "v" : "r"];
+      return `sensor.${c.prefix}_${f.replace(/\{(n+)\}/g, (_m, d) => String(n).padStart(d.length, "0"))}`;
+    }
+    // 3b. a BMS_BLE battery's cell list
     if (this._ble()) {
       const e = bleEntities(this._hass, this._ble()).cells;
       return kind === "v" && e ? `${e}@cell_voltages[${n - 1}]` : null;
@@ -1971,8 +2125,10 @@ class BatteryPackCard extends HTMLElement {
     const powRaw= this._exists(E.powW) ? this._watts(E.powW) * this._sign() : this._num(E.packV) * curA;
     const powW  = Number.isFinite(powRaw) ? powRaw : 0;
     const balA  = this._num(E.balA);
-    const cycles= this._state(E.cycles) || "0";
-    const runtime= this._ble() ? this._bleRuntime(E.runtime) : this._state(E.runtime) || "";
+    // A whole number: ESPHome reports 12.0 where the add-on reports 12.
+    const cyclesRaw = this._state(E.cycles), cyclesN = parseFloat(cyclesRaw);
+    const cycles= Number.isFinite(cyclesN) ? String(Math.round(cyclesN)) : (cyclesRaw || "0");
+    const runtime= this._ble() || this._tpl() ? this._bleRuntime(E.runtime) : this._state(E.runtime) || "";
     // Voltage units are read off the data (see MV_CUTOFF); the configured
     // units only apply until a reading is available.
     const cellRaw = [];
@@ -2021,9 +2177,12 @@ class BatteryPackCard extends HTMLElement {
       if (!this._exists(E.maxCell)) maxCell = cv.indexOf(hi) + 1;
     }
     const phase = this._state(E.phase) || "—";
-    const alarmActive = this._on(E.alarmB);
+    // A templated pack may have no on/off alarm sensor, only an error text
+    // and / or a count of active alarms.
+    const alarmActive = this._on(E.alarmB) || (!!this._tpl() && this._tplAlarm(E));
     // BMS_BLE has a problem sensor but no alarm text.
-    const alarm = this._state(E.alarmS) || (this._ble() && this._exists(E.alarmB) ? (alarmActive ? "Problem" : "Normal") : "—");
+    const alarm = this._state(E.alarmS) || (this._ble() && this._exists(E.alarmB) ? (alarmActive ? "Problem" : "Normal")
+      : this._tpl() && this._exists(E.alarmS) ? "Normal" : "—");
     const chgOn  = this._on(E.chg);
     const dchOn  = this._on(E.dch);
     const balAct = this._on(E.balAct);
@@ -2089,7 +2248,7 @@ class BatteryPackCard extends HTMLElement {
         <div class="title">${this._esc(cfg.name)}</div>
         <div class="hdr-r">
           ${this._alertsHtml()}
-          <div class="alarm ${alarmActive ? "alert" : "ok"}" ${this._dataE(E.alarmB)} role="button">
+          <div class="alarm ${alarmActive ? "alert" : "ok"}" ${this._dataE(E.alarmB || E.alarmS)} role="button">
             <span class="dot"></span>${this._esc(alarm)}
           </div>
         </div>
@@ -2614,6 +2773,19 @@ class BatteryPackCardEditor extends HTMLElement {
         if (b && (!next.name || next.name === "Battery")) next.name = b.name;
       }
       if (!dev) delete next.bms_ble_device;
+      // "JK-BMS add-on (default)" is no template at all.
+      if (next.template === "jkbms_addon") next.template = "";
+      // A prefix of a templated pack just picked: use its template, and take
+      // over its cell count.
+      const pfx = orNull(next.prefix);
+      if (pfx && pfx !== orNull(this._config.prefix) && !orNull(next.template) && !findPrefixes(this._hass).includes(pfx)) {
+        const key = Object.keys(TEMPLATES).find((k) => findTemplatePrefixes(this._hass, k).includes(pfx));
+        if (key) next.template = key;
+      }
+      const tk = orNull(next.template);
+      if (tk && TEMPLATES[tk] && pfx && (pfx !== orNull(this._config.prefix) || tk !== orNull(this._config.template))) {
+        next.cells = templateCellCount(this._hass, tk, pfx) || next.cells;
+      }
       this._dispatch(next);
     });
     this._basicPane.appendChild(this._basicForm);
@@ -2797,8 +2969,13 @@ class BatteryPackCardEditor extends HTMLElement {
     return this._bleSchema;
   }
 
+  // Prefixes of every templated integration's packs in this HA.
+  _templatePrefixes() {
+    return Object.keys(TEMPLATES).flatMap((key) => findTemplatePrefixes(this._hass, key));
+  }
+
   _prefixSchema() {
-    const found = findPrefixes(this._hass);
+    const found = [...new Set([...findPrefixes(this._hass), ...this._templatePrefixes()])];
     const cur = this._config.prefix;
     if (!found.length) return BASIC_SCHEMA;
     const options = [...new Set([...(cur ? [cur] : []), ...found])].map((p) => ({ value: p, label: found.includes(p) ? `${p} (${prefixName(p)})` : p }));
@@ -2829,7 +3006,7 @@ class BatteryPackCardEditor extends HTMLElement {
     } else if (this._tab === "basic") {
       this._basicForm.hass = this._hass;
       this._basicForm.schema = this._basicSchema();
-      this._basicForm.data = { ...DEFAULTS, ...this._config };
+      this._basicForm.data = { ...DEFAULTS, ...this._config, template: orNull(this._config.template) || "jkbms_addon" };
     } else {
       const N = Math.max(1, Math.min(512, parseInt(this._config.cells, 10) || 16));
       if (N !== this._lastCellsN) {

@@ -41,6 +41,34 @@ bms_ble_device: 0123456789abcdef0123456789abcdef   # the battery's device id; ea
 
 Only cards with `bms_ble_device` set do any of this; every other card works exactly as before. Thanks to @mohrerao for the idea and the first version (#19).
 
+## ESPHome JK-BMS RS485
+
+For [ajvdw/esphome-jk-bms](https://github.com/ajvdw/esphome-jk-bms) (the `jk_rs485_bms` ESPHome component), pick the **ESPHome JK-BMS RS485** template. The prefix is the ESPHome sub-device name, lowercased with `-` turned into `_` (device `BMS-rechts` → `bms_rechts`):
+
+```yaml
+type: custom:battery-pack-card
+name: BMS rechts
+prefix: bms_rechts
+template: esphome_jk_rs485
+```
+
+The cell count is read from the `cell count real` sensor, so an 8S pack on a 16-cell YAML shows 8 cells. In the editor, packs of this kind are listed in the prefix dropdown and the template is chosen for you.
+
+| Card field | ESPHome entity |
+| --- | --- |
+| SOC / SOH | `battery capacity state of charge` / `battery soh valuation` |
+| Voltage / current / power | `battery voltage` / `battery current` / `battery power` |
+| Capacity | `battery capacity remaining` / `battery capacity setting` |
+| Cycles / runtime | `charging cycles` / `battery total runtime` (seconds, shown as `1d 2h`) |
+| Balance current | `balancing current` |
+| Cell summary | `cell average voltage`, `cell voltage min/max`, `cell delta voltage`, `cell voltage min/max cell number` |
+| Cells | `cell voltage 01…` / `cell resistance 01…` |
+| Pills | `status charging`, `status discharging`, `status balancing` |
+| Alarm | `bms errors` (text) and `battery total alarms active` (count) |
+| Temperatures | MOS = `temperature powertube`, probes 1–4 = `temperature sensor 1–4` |
+
+Not in the ESPHome example, so not shown unless you set an `entity_*` override: charge phase, heater, DRY1/DRY2, ambient temperature, balancer-enabled. Check the sign of `battery current`: if charging shows as discharging, set `invert_current: true`.
+
 ## Install
 
 ### Via HACS (recommended)
